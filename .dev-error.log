@@ -1,0 +1,4 @@
+(node:26728) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:26728) ExperimentalWarning: Importing JSON modules is an experimental feature and might change at any time
+(node:26728) ExperimentalWarning: glob is an experimental feature and might change at any time
