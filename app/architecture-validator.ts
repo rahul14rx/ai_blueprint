@@ -1,5 +1,5 @@
 import { Brief, FloorPlan, Opening, Room, RoomType } from "./studio-types";
-import { ROOM_RULES, exteriorWalls, isCirculationLike, needsWetVentilation, requiresDirectKitchenDining, roomMatches, roomMeetsMinimum, roomsTouch, sharedWall, toUnit } from "./layout-rules";
+import { ROOM_RULES, exteriorWalls, isCirculationLike, needsWetVentilation, requiresDirectKitchenDining, roomExceedsMaximum, roomMatches, roomMeetsMinimum, roomsTouch, sharedWall, toUnit } from "./layout-rules";
 
 export type ArchitectureIssue = {
   severity: "error" | "warning";
@@ -28,6 +28,15 @@ function hasVent(room: Room, plan: FloorPlan) {
 
 function hasVentilation(room: Room, plan: FloorPlan) {
   return hasWindow(room, plan) || hasVent(room, plan);
+}
+
+function hasBorrowedLight(room: Room, plan: FloorPlan) {
+  if (room.type !== "dining" || !room.name.toLowerCase().includes("open")) return false;
+  return plan.rooms.some(other =>
+    ["kitchen", "living", "foyer"].includes(other.type) &&
+    roomsTouch(room, other) &&
+    (hasWindow(other, plan) || exteriorWalls(other, plan).length > 0)
+  );
 }
 
 function roomHasRoadDoor(room: Room, plan: FloorPlan, brief: Brief) {
@@ -83,7 +92,7 @@ function roomHasDoorToCirculation(room: Room, plan: FloorPlan) {
 
 function bathroomHasValidDoor(room: Room, plan: FloorPlan) {
   const attached = room.name.toLowerCase().includes("attached");
-  return doorTargetsForRoom(room, plan).some(target => isCirculationLike(target) || (attached && target.type === "bedroom"));
+  return doorTargetsForRoom(room, plan).some(target => attached ? target.type === "bedroom" : isCirculationLike(target));
 }
 
 function buildAccessGraph(plan: FloorPlan) {
@@ -184,6 +193,9 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
     if (!roomMeetsMinimum(room, brief)) {
       add(issues, "error", "size", `${room.name} is below the recommended ${rule.minWidth} ft x ${rule.minDepth} ft minimum.`);
     }
+    if (roomExceedsMaximum(room, brief)) {
+      add(issues, "warning", "size", `${room.name} is larger than the recommended functional range for a ${room.type}.`);
+    }
 
     if (room.type === "hallway") {
       const clearWidth = Math.min(room.width, room.depth);
@@ -193,8 +205,11 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
     if (rule.needsAccess && !reachable.has(room.id)) add(issues, "error", "access", `${room.name} is not clearly reachable from the main entry/circulation path.`);
     if (roomNeedsExplicitDoor(room) && !roomHasUsableDoor(room, plan, brief)) add(issues, "error", "access", `${room.name} has no usable door opening.`);
     if (room.type === "bedroom" && !roomHasDoorToCirculation(room, plan)) add(issues, "error", "access", `${room.name} must have a door to a hallway, foyer, or circulation pocket.`);
-    if (room.type === "bathroom" && !bathroomHasValidDoor(room, plan)) add(issues, "error", "access", `${room.name} must have a door to circulation or an attached bedroom.`);
-    if (rule.needsExterior && exteriorWalls(room, plan).length === 0 && !hasVentilation(room, plan)) add(issues, "warning", "light", `${room.name} has no exterior wall for natural light/ventilation.`);
+    if (room.type === "bathroom" && !bathroomHasValidDoor(room, plan)) {
+      const attached = room.name.toLowerCase().includes("attached");
+      add(issues, "error", "access", attached ? `${room.name} must have a direct door to a bedroom.` : `${room.name} must have a door to circulation.`);
+    }
+    if (rule.needsExterior && exteriorWalls(room, plan).length === 0 && !hasVentilation(room, plan) && !hasBorrowedLight(room, plan)) add(issues, "warning", "light", `${room.name} has no exterior wall for natural light/ventilation.`);
     if (rule.needsExterior && exteriorWalls(room, plan).length > 0 && !hasWindow(room, plan)) add(issues, "warning", "light", `${room.name} touches an exterior wall but has no window opening.`);
     if (room.type === "bathroom" && exteriorWalls(room, plan).length === 0 && !hasVent(room, plan)) add(issues, "error", "light", `${room.name} is internal and needs a ventilation shaft or exhaust route.`);
     if (needsWetVentilation(room) && exteriorWalls(room, plan).length === 0 && !hasVentilation(room, plan)) add(issues, "warning", "light", `${room.name} needs a window or exhaust vent.`);

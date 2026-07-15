@@ -1,6 +1,6 @@
 import { Brief, ROOM_COLORS, Room, RoomType, WallSide } from "./studio-types";
 import { buildLayoutProgram, LayoutProgram, RoomRequirement } from "./layout-program";
-import { clamp, exteriorWalls, isCirculationLike, requiresDirectKitchenDining, resolvedRoadSide, roomMeetsMinimum, roomsTouch, roomRule, toUnit } from "./layout-rules";
+import { clamp, explicitPlacementIntents, exteriorWalls, isCirculationLike, placementDistance, requiresDirectKitchenDining, resolvedRoadSide, roomExceedsMaximum, roomMeetsMinimum, roomsTouch, roomRule, toUnit, wantsAttachedBath } from "./layout-rules";
 
 type Candidate = {
   strategy: string;
@@ -34,6 +34,13 @@ function byType(program: LayoutProgram, type: RoomType) {
 
 function shapeFor(req: RoomRequirement | undefined, curveSide: WallSide): Pick<Room, "shape" | "curveSide"> {
   return req?.shape === "rounded" ? { shape: "rounded", curveSide } : {};
+}
+
+function leftoverSupportRoom(level: number, key: string, x: number, y: number, width: number, depth: number, brief: Brief): Room | null {
+  if (width < toUnit(brief, 3) || depth < toUnit(brief, 3)) return null;
+  if (width >= toUnit(brief, 8) && depth >= toUnit(brief, 8)) return makeRoom(level, key, "Flex room", "study", x, y, width, depth);
+  if (width >= toUnit(brief, 4) && depth >= toUnit(brief, 5)) return makeRoom(level, key, "Service pocket", "storage", x, y, width, depth);
+  return makeRoom(level, key, "Access pocket", "hallway", x, y, width, depth);
 }
 
 function rotateForRoad(rooms: Room[], brief: Brief, roadSide: Brief["roadSide"] | Brief["facing"]) {
@@ -95,7 +102,7 @@ function makeNorthSouthCandidates(brief: Brief, level: number, program: LayoutPr
 
   for (let i = 0; i < bathCount; i++) {
     const bathH = clamp(privateH / Math.max(2, bathCount + 1), toUnit(brief, 7), toUnit(brief, 8.5));
-    rooms.push(makeRoom(level, `bathroom-${i + 1}`, i === 0 && /attached/i.test(brief.prompt) ? "Attached bath" : i === bathCount - 1 && /half bath|powder/i.test(brief.prompt) ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", W - bathW, privateTop + i * bathH, bathW, bathH));
+    rooms.push(makeRoom(level, `bathroom-${i + 1}`, i === 0 && wantsAttachedBath(brief) ? "Attached bath" : i === bathCount - 1 && /half bath|powder/i.test(brief.prompt) ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", W - bathW, privateTop + i * bathH, bathW, bathH));
   }
 
   const publicX = leftW + hallW;
@@ -112,7 +119,73 @@ function makeNorthSouthCandidates(brief: Brief, level: number, program: LayoutPr
 
   const centralSpine = makeNorthSouthCentralSpineCandidate(brief, level, program, roadSide);
   if (centralSpine) candidates.push(centralSpine);
+  const publicRight = makeNorthSouthCompactPublicRightCandidate(brief, level, program, roadSide);
+  if (publicRight) candidates.push(publicRight);
   return candidates;
+}
+
+function wantsRoomAt(brief: Brief, type: RoomType, sides: Array<"north" | "south" | "east" | "west" | "center">) {
+  return explicitPlacementIntents(brief).some(intent => intent.type === type && sides.every(side => intent.sides.includes(side)));
+}
+
+function makeNorthSouthCompactPublicRightCandidate(brief: Brief, level: number, program: LayoutProgram, roadSide: "north" | "south"): Candidate | null {
+  const W = brief.plotWidth;
+  const D = brief.plotDepth;
+  const bedroomCount = byType(program, "bedroom").length;
+  const bathCount = byType(program, "bathroom").length;
+  const hasKitchen = hasReq(program, "kitchen");
+  const hasDining = hasReq(program, "dining");
+  const hasLiving = hasReq(program, "living");
+  const hasStairs = hasReq(program, "stairs");
+  const hasPorch = hasReq(program, "porch");
+  if (hasReq(program, "garage") || bedroomCount > 2 || bathCount > 1 || !hasLiving || !wantsRoomAt(brief, "living", [roadSide, "east"])) return null;
+
+  const porchD = clamp(D * 0.24, toUnit(brief, hasStairs || hasPorch ? 9 : 7), toUnit(brief, 10));
+  const leftW = clamp(W * 0.38, toUnit(brief, 10), toUnit(brief, 13));
+  const centerW = clamp(W * 0.27, toUnit(brief, hasDining ? 8 : hasStairs ? 6.5 : 5), toUnit(brief, 8.5));
+  const rightW = W - leftW - centerW;
+  if (rightW < toUnit(brief, 10)) return null;
+
+  const frontY = D - porchD;
+  const kitchenD = hasKitchen ? clamp(D * 0.28, toUnit(brief, 10), toUnit(brief, 12)) : 0;
+  const livingD = clamp(D * 0.34, toUnit(brief, 12), toUnit(brief, 14));
+  const livingY = Math.max(kitchenD, frontY - livingD);
+  const bathD = bathCount ? clamp(D * 0.2, toUnit(brief, 7), toUnit(brief, 8.5)) : 0;
+  const bedroomH = (frontY - bathD) / Math.max(1, bedroomCount);
+  if (bedroomH < toUnit(brief, 10)) return null;
+
+  const rooms: Room[] = [];
+  const bathW = Math.min(toUnit(brief, 6.5), leftW * 0.52);
+  if (bathCount) {
+    rooms.push(makeRoom(level, "bathroom-1", wantsAttachedBath(brief) ? "Attached bath" : "Common bath", "bathroom", 0, 0, bathW, bathD));
+    if (leftW - bathW >= toUnit(brief, 3.5)) rooms.push(makeRoom(level, "service-passage-1", "Service passage", "hallway", bathW, 0, leftW - bathW, bathD));
+  }
+  for (let i = 0; i < bedroomCount; i++) {
+    rooms.push(makeRoom(level, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", 0, bathD + i * bedroomH, leftW, bedroomH));
+  }
+  rooms.push(makeRoom(level, "front-foyer", "Front foyer", "foyer", 0, frontY, leftW, porchD));
+
+  if (hasDining) {
+    const diningD = clamp(D * 0.34, toUnit(brief, 10), toUnit(brief, 14));
+    const diningY = clamp(kitchenD * 0.8, toUnit(brief, 4), Math.max(toUnit(brief, 4), frontY - diningD));
+    if (diningY >= toUnit(brief, 3.5)) rooms.push(makeRoom(level, "rear-hall", "Rear hall", "hallway", leftW, 0, centerW, diningY));
+    rooms.push(makeRoom(level, "dining-1", "Open dining area", "dining", leftW, diningY, centerW, diningD));
+    const frontHallY = diningY + diningD;
+    if (frontY - frontHallY >= toUnit(brief, 3.5)) rooms.push(makeRoom(level, "front-hall", "Front hall", "hallway", leftW, frontHallY, centerW, frontY - frontHallY));
+  } else {
+    rooms.push(makeRoom(level, "central-hall", "Central hallway", "hallway", leftW, 0, centerW, D));
+  }
+  if (hasStairs) rooms.push(makeRoom(level, "stairs-1", "Internal stairs", "stairs", leftW, frontY, centerW, porchD));
+
+  if (hasKitchen) rooms.push(makeRoom(level, "kitchen-1", "Kitchen", "kitchen", leftW + centerW, 0, rightW, kitchenD));
+  const livingReq = findReq(program, "living");
+  const livingShape = shapeFor(livingReq, "east");
+  const flexH = livingY - kitchenD;
+  if (flexH >= toUnit(brief, 5)) rooms.push(makeRoom(level, "service-pocket-1", "Service pocket", "storage", leftW + centerW, kitchenD, rightW, flexH));
+  rooms.push(makeRoom(level, "living-1", brief.livingRooms > 1 ? "Living room 1" : "Living room", "living", leftW + centerW, livingY, rightW, frontY - livingY, livingShape.shape, livingShape.curveSide));
+  if (hasPorch || !hasStairs) rooms.push(makeRoom(level, "porch-1", "Porch", "porch", leftW + centerW, frontY, rightW, porchD));
+
+  return { strategy: "north-south-compact-public-right", rooms: rotateForRoad(rooms, brief, roadSide) };
 }
 
 function makeNorthSouthCentralSpineCandidate(brief: Brief, level: number, program: LayoutProgram, roadSide: "north" | "south"): Candidate | null {
@@ -208,19 +281,29 @@ function makeNorthSouthCentralSpineCandidate(brief: Brief, level: number, progra
         const rowY = middleTop + i * rowH;
         const hasBedroomEntry = rightBedroomRows.has(i);
         const entryH = hasBedroomEntry ? clamp(rowH * 0.28, toUnit(brief, 3.5), Math.max(toUnit(brief, 3.5), rowH - toUnit(brief, 7))) : 0;
-        const bathH = rowH - entryH;
-        const attached = i === 0 && /attached/i.test(brief.prompt);
+        const bathH = clamp(rowH - entryH, toUnit(brief, 7), Math.min(toUnit(brief, 8.5), rowH - entryH));
+        const attached = i === 0 && wantsAttachedBath(brief);
         const half = i === bathCount - 1 && /half bath|powder/i.test(brief.prompt);
         rooms.push(makeRoom(level, `bathroom-${i + 1}`, attached ? "Attached bath" : half ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", rightX, rowY, bathStripW, bathH));
+        if (!hasBedroomEntry) {
+          const leftover = leftoverSupportRoom(level, `bath-leftover-${i + 1}`, rightX, rowY + bathH, bathStripW, rowH - bathH, brief);
+          if (leftover) rooms.push(leftover);
+        }
         if (hasBedroomEntry) rooms.push(makeRoom(level, `bedroom-${i + rows + 1}-entry`, `Bedroom ${i + rows + 1} entry`, "hallway", rightX, rowY + bathH, bathStripW, entryH));
         if (!hasBedroomEntry && rightBedroomW >= toUnit(brief, 3)) rooms.push(makeRoom(level, `linen-${i + 1}`, `Linen ${i + 1}`, "storage", rightX + bathStripW, rowY, rightBedroomW, rowH));
       }
     } else {
-      const bathH = middleH / bathCount;
+      const rowH = middleH / bathCount;
+      const bathW = clamp(rightW * 0.46, toUnit(brief, 5.5), Math.min(toUnit(brief, 7), rightW));
+      const bathD = clamp(rowH * 0.45, toUnit(brief, 7), Math.min(toUnit(brief, 8.5), rowH));
       for (let i = 0; i < bathCount; i++) {
-        const attached = i === 0 && /attached/i.test(brief.prompt);
+        const rowY = middleTop + i * rowH;
+        const attached = i === 0 && wantsAttachedBath(brief);
         const half = i === bathCount - 1 && /half bath|powder/i.test(brief.prompt);
-        rooms.push(makeRoom(level, `bathroom-${i + 1}`, attached ? "Attached bath" : half ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", rightX, middleTop + i * bathH, rightW, bathH));
+        rooms.push(makeRoom(level, `bathroom-${i + 1}`, attached ? "Attached bath" : half ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", rightX, rowY, bathW, bathD));
+        if (rightW - bathW >= toUnit(brief, 3)) rooms.push(makeRoom(level, `bath-linen-${i + 1}`, `Bath linen ${i + 1}`, "storage", rightX + bathW, rowY, rightW - bathW, bathD));
+        const leftover = leftoverSupportRoom(level, `bath-leftover-${i + 1}`, rightX, rowY + bathD, rightW, rowH - bathD, brief);
+        if (leftover) rooms.push(leftover);
       }
     }
   }
@@ -315,7 +398,7 @@ function makeEastWestCandidates(brief: Brief, level: number, program: LayoutProg
     const bathH = clamp(bedH * 0.52, toUnit(brief, 7), toUnit(brief, 8.5));
     const rowY = privateTop + i * bedH;
     const entryH = Math.min(toUnit(brief, 4.5), Math.max(toUnit(brief, 3.5), bedH - bathH));
-    rooms.push(makeRoom(level, `bathroom-${i + 1}`, i === 0 && /attached/i.test(brief.prompt) ? "Attached bath" : `Bathroom ${i + 1}`, "bathroom", bedW, rowY, bathW, bathH));
+    rooms.push(makeRoom(level, `bathroom-${i + 1}`, i === 0 && wantsAttachedBath(brief) ? "Attached bath" : `Bathroom ${i + 1}`, "bathroom", bedW, rowY, bathW, bathH));
     if (entryH >= toUnit(brief, 3.5)) rooms.push(makeRoom(level, `bedroom-${i + 1}-entry`, `Bedroom ${i + 1} entry`, "hallway", bedW, rowY + bedH - entryH, bathW, entryH));
   }
   if (hasSupport) rooms.push(makeRoom(level, "utility-1", hasReq(program, "laundry") ? "Laundry / utility" : "Utility", hasReq(program, "laundry") ? "laundry" : "utility", 0, D - supportH, privateW, supportH));
@@ -358,7 +441,12 @@ function makeEastWestCompactCandidate(brief: Brief, level: number, program: Layo
     rooms.push(makeRoom(level, "living-1", "Living room", "living", privateW + hallW, 0, roadW, livingD, shape.shape, shape.curveSide));
   }
   rooms.push(makeRoom(level, "foyer-1", "Foyer", "foyer", privateW + hallW, livingD, roadW, foyerD));
-  if (bathCount) rooms.push(makeRoom(level, "bathroom-1", /attached/i.test(brief.prompt) ? "Attached bath" : "Bathroom 1", "bathroom", privateW + hallW, livingD + foyerD, roadW, toUnit(brief, 7)));
+  if (bathCount) {
+    const bathW = Math.min(roadW, toUnit(brief, 6.5));
+    const bathY = livingD + foyerD;
+    rooms.push(makeRoom(level, "bathroom-1", wantsAttachedBath(brief) ? "Attached bath" : "Bathroom 1", "bathroom", privateW + hallW, bathY, bathW, toUnit(brief, 7)));
+    if (roadW - bathW >= toUnit(brief, 3)) rooms.push(makeRoom(level, "bath-linen-1", "Bath linen 1", "storage", privateW + hallW + bathW, bathY, roadW - bathW, toUnit(brief, 7)));
+  }
   const serviceY = livingD + foyerD + (bathCount ? toUnit(brief, 7) : 0);
   if (hasReq(program, "utility") || hasReq(program, "laundry")) {
     const supportType = hasReq(program, "laundry") ? "laundry" : "utility";
@@ -431,6 +519,10 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
   rooms.forEach((room, i) => {
     if (room.x < -0.01 || room.y < -0.01 || room.x + room.width > brief.plotWidth + 0.01 || room.y + room.depth > brief.plotDepth + 0.01) hardErrors.push(`${room.name} extends outside the plot.`);
     if (!roomMeetsMinimum(room, brief)) hardErrors.push(`${room.name} is below minimum size.`);
+    if (roomExceedsMaximum(room, brief)) {
+      score -= 10;
+      warnings.push(`${room.name} is larger than its recommended functional size.`);
+    }
     const ratio = Math.max(room.width, room.depth) / Math.max(0.01, Math.min(room.width, room.depth));
     if (!["hallway", "stairs", "porch"].includes(room.type) && ratio > 2.6) {
       score -= (ratio - 2.6) * 6;
@@ -446,10 +538,33 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
   const entryRooms = rooms.filter(room => isCirculationLike(room) && roadSide !== "unspecified" && exteriorWalls(room, planBox).includes(roadSide));
   if (!entryRooms.length) hardErrors.push("No clear entry room touches the road side.");
 
+  const placementKeys = new Set<string>();
+  explicitPlacementIntents(brief).forEach(intent => {
+    const placementKey = `${intent.type}:${intent.sides.slice().sort().join("+")}`;
+    if (placementKeys.has(placementKey)) return;
+    placementKeys.add(placementKey);
+    const matching = rooms.filter(room => roomMatchesIntent(room, intent.type));
+    if (!matching.length) return;
+    const bestDistance = Math.min(...matching.map(room => Math.max(...intent.sides.map(side => placementDistance(room, planBox, side)))));
+    if (bestDistance > 0.5) {
+      score -= 24;
+      warnings.push(`${intent.type} placement does not follow "${intent.source}".`);
+    } else if (bestDistance > 0.35) {
+      score -= 6;
+    }
+  });
+
   rooms.filter(room => roomRule(room.type).needsAccess).forEach(room => {
     if (!reachable.has(room.id) && !isCirculationLike(room)) {
       score -= 18;
       hardErrors.push(`${room.name} is not attached to circulation.`);
+    }
+  });
+
+  rooms.filter(room => room.type === "bathroom" && room.name.toLowerCase().includes("attached")).forEach(room => {
+    if (!rooms.some(other => other.type === "bedroom" && roomsTouch(room, other))) {
+      score -= 30;
+      hardErrors.push(`${room.name} is labeled attached but does not touch a bedroom.`);
     }
   });
 
@@ -465,7 +580,7 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
   }
 
   rooms.filter(room => roomRule(room.type).needsExterior).forEach(room => {
-    if (!exteriorWalls(room, planBox).length) {
+    if (!exteriorWalls(room, planBox).length && !hasBorrowedPublicLight(room, rooms, planBox)) {
       score -= 8;
       warnings.push(`${room.name} has no exterior wall.`);
     }
@@ -481,7 +596,20 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
   return { ...candidate, rooms, score, hardErrors: [...new Set(hardErrors)], warnings: [...new Set(warnings)] };
 }
 
+function roomMatchesIntent(room: Room, type: RoomType) {
+  return room.type === type || (type === "dining" && room.name.toLowerCase().includes("dining"));
+}
+
+function hasBorrowedPublicLight(room: Room, rooms: Room[], planBox: { width: number; depth: number }) {
+  if (room.type !== "dining" || !room.name.toLowerCase().includes("open")) return false;
+  return rooms.some(other => ["kitchen", "living", "foyer"].includes(other.type) && roomsTouch(room, other) && exteriorWalls(other, planBox).length > 0);
+}
+
 export function optimizeGroundFloor(brief: Brief, level: number): OptimizedLayout | null {
+  return evaluateGroundFloorCandidates(brief, level)[0] ?? null;
+}
+
+export function evaluateGroundFloorCandidates(brief: Brief, level: number): OptimizedLayout[] {
   const program = buildLayoutProgram(brief);
   const roadSide = resolvedRoadSide(brief);
   const candidates: Candidate[] = [];
@@ -492,6 +620,5 @@ export function optimizeGroundFloor(brief: Brief, level: number): OptimizedLayou
     candidates.push(...makeEastWestCandidates(brief, level, program, roadSide === "west" ? "west" : "east"));
   }
 
-  const evaluated = candidates.map(candidate => scoreCandidate(brief, program, candidate)).sort((a, b) => b.score - a.score || a.hardErrors.length - b.hardErrors.length);
-  return evaluated[0] ?? null;
+  return candidates.map(candidate => scoreCandidate(brief, program, candidate)).sort((a, b) => b.score - a.score || a.hardErrors.length - b.hardErrors.length);
 }

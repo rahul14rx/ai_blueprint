@@ -1,6 +1,7 @@
 import { Brief, FloorPlan, Opening, Project, ROOM_COLORS, Room, RoomType, PRESETS } from "./studio-types";
 import { optimizeGroundFloor } from "./layout-optimizer";
-import { needsWetVentilation, roomMeetsMinimum } from "./layout-rules";
+import { needsWetVentilation, roomMeetsMinimum, wantsAttachedBath } from "./layout-rules";
+import { evaluateArchitecture } from "./architecture-validator";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const room = (level: number, name: string, type: RoomType, x: number, y: number, width: number, depth: number): Room => ({ id: `f${level}-${type}-${uid()}`, name, type, x, y, width, depth, color: ROOM_COLORS[type] });
@@ -57,7 +58,7 @@ function roomSpecs(brief: Brief): { name: string; type: RoomType }[] {
   for (let i = 0; i < brief.kitchens; i++) specs.push({ name: brief.kitchens > 1 ? `Kitchen ${i + 1}` : "Kitchen", type: "kitchen" });
   for (let i = 0; i < brief.diningRooms; i++) specs.push({ name: brief.diningRooms > 1 ? `Dining ${i + 1}` : "Dining", type: "dining" });
   for (let i = 0; i < brief.bedrooms; i++) specs.push({ name: `Bedroom ${i + 1}`, type: "bedroom" });
-  for (let i = 0; i < brief.bathrooms; i++) specs.push({ name: i === 0 && brief.bedrooms ? "Attached bath" : `Bathroom ${i + 1}`, type: "bathroom" });
+  for (let i = 0; i < brief.bathrooms; i++) specs.push({ name: i === 0 && brief.bedrooms && wantsAttachedBath(brief) ? "Attached bath" : `Bathroom ${i + 1}`, type: "bathroom" });
   if (brief.features.includes("internal_staircase")) specs.push({ name: "Internal stairs", type: "stairs" });
   if (brief.features.includes("garage")) specs.push({ name: "Garage", type: "garage" });
   if (brief.features.includes("utility")) specs.push({ name: "Utility", type: "utility" });
@@ -72,18 +73,24 @@ function roomSpecs(brief: Brief): { name: string; type: RoomType }[] {
 
 function generateArchitecturalGroundFloor(brief: Brief, level: number): FloorPlan {
   const optimized = optimizeGroundFloor(brief, level);
-  if (optimized && optimized.hardErrors.length === 0) return makeFloorPlan(brief, level, optimized.rooms);
-
   const roadSide = brief.roadSide !== "unspecified" ? brief.roadSide : brief.facing;
+  const candidates: FloorPlan[] = [];
+  if (optimized) candidates.push(makeFloorPlan(brief, level, optimized.rooms));
   if ((roadSide === "north" || roadSide === "south") && brief.bedrooms === 3 && !brief.features.includes("garage") && brief.plotWidth >= feet(brief, 24) && brief.plotDepth >= feet(brief, 38)) {
-    return makeCompactThreeBedroomPlan(brief, level, roadSide);
+    candidates.push(makeCompactThreeBedroomPlan(brief, level, roadSide));
   }
   if ((roadSide === "north" || roadSide === "south") && brief.bedrooms === 2 && !brief.features.includes("garage") && brief.plotWidth >= feet(brief, 24) && brief.plotDepth >= feet(brief, 32)) {
-    return makeCompactTwoBedroomOpenPlan(brief, level, roadSide);
+    candidates.push(makeCompactTwoBedroomOpenPlan(brief, level, roadSide));
   }
-  return roadSide === "north" || roadSide === "south"
+  candidates.push(roadSide === "north" || roadSide === "south"
     ? makeNorthSouthPlan(brief, level, roadSide)
-    : makeEastWestPlan(brief, level, roadSide === "west" ? "west" : "east");
+    : makeEastWestPlan(brief, level, roadSide === "west" ? "west" : "east"));
+
+  return candidates.find(plan => finalPlanErrors(brief, plan).length === 0) ?? candidates[0];
+}
+
+export function finalPlanErrors(brief: Brief, plan: FloorPlan) {
+  return [...validatePlans([plan]), ...evaluateArchitecture(brief, plan).errors];
 }
 
 function makeCompactTwoBedroomOpenPlan(brief: Brief, level: number, roadSide: "north" | "south"): FloorPlan {
@@ -125,6 +132,7 @@ function makeCompactThreeBedroomPlan(brief: Brief, level: number, roadSide: "nor
   const frontY = D - publicD;
   const backD = D - publicD;
   const bathD = clamp(D * 0.18, feet(brief, 7), feet(brief, 8.5));
+  const bathW = Math.min(rightW, feet(brief, 6.5));
   const hasLaundry = brief.features.includes("utility") || brief.features.includes("laundry");
   const laundryD = hasLaundry ? clamp(D * 0.12, feet(brief, 5), feet(brief, 6.5)) : 0;
   const rightBedroomD = backD - bathD * Math.min(2, brief.bathrooms) - laundryD;
@@ -138,14 +146,21 @@ function makeCompactThreeBedroomPlan(brief: Brief, level: number, roadSide: "nor
   rooms.push(room(level, "Bedroom 1", "bedroom", 0, 0, leftW, leftBedroomD));
   rooms.push(room(level, "Bedroom 2", "bedroom", 0, leftBedroomD, leftW, leftBedroomD));
   rooms.push(room(level, "Bedroom 3", "bedroom", hallX + hallW, 0, rightW, Math.max(feet(brief, 10), rightBedroomD)));
-  if (brief.bathrooms >= 1) rooms.push(room(level, "Bathroom 1", "bathroom", hallX + hallW, Math.max(feet(brief, 10), rightBedroomD), rightW, bathD));
+  if (brief.bathrooms >= 1) {
+    const bathY = Math.max(feet(brief, 10), rightBedroomD);
+    rooms.push(room(level, "Bathroom 1", "bathroom", hallX + hallW, bathY, bathW, bathD));
+    if (rightW - bathW >= feet(brief, 3)) rooms.push(room(level, "Bath linen 1", "storage", hallX + hallW + bathW, bathY, rightW - bathW, bathD));
+  }
   const wetTop = Math.max(feet(brief, 10), rightBedroomD) + bathD;
   const wetH = frontY - wetTop;
   if (brief.bathrooms >= 2 && hasLaundry && wetH >= feet(brief, 4)) {
-    rooms.push(room(level, "Half bath", "bathroom", hallX + hallW, wetTop, rightW * 0.48, wetH));
-    rooms.push(room(level, "Laundry", "laundry", hallX + hallW + rightW * 0.48, wetTop, rightW * 0.52, wetH));
+    const wetRoomH = Math.min(wetH, feet(brief, 8.5));
+    const halfBathW = Math.min(rightW * 0.48, feet(brief, 6.5));
+    rooms.push(room(level, "Half bath", "bathroom", hallX + hallW, wetTop, halfBathW, wetRoomH));
+    rooms.push(room(level, "Laundry", "laundry", hallX + hallW + halfBathW, wetTop, rightW - halfBathW, wetRoomH));
+    if (wetH - wetRoomH >= feet(brief, 3.5)) rooms.push(room(level, "Service pocket", "storage", hallX + hallW, wetTop + wetRoomH, rightW, wetH - wetRoomH));
   } else {
-    if (brief.bathrooms >= 2 && wetH >= feet(brief, 4)) rooms.push(room(level, "Half bath", "bathroom", hallX + hallW, wetTop, rightW, wetH));
+    if (brief.bathrooms >= 2 && wetH >= feet(brief, 4)) rooms.push(room(level, "Half bath", "bathroom", hallX + hallW, wetTop, Math.min(rightW, feet(brief, 6.5)), Math.min(wetH, feet(brief, 8.5))));
     if (hasLaundry) rooms.push(room(level, "Laundry", "laundry", hallX + hallW, frontY - laundryD, rightW, laundryD));
   }
 
@@ -199,7 +214,7 @@ function makeEastWestPlan(brief: Brief, level: number, roadSide: "east" | "west"
     if (i < brief.bedrooms) rooms.push(room(level, `Bedroom ${i + 1}`, "bedroom", 0, y, bedW || leftW, bedH));
     if (i < brief.bathrooms) {
       const entryH = Math.min(feet(brief, 4.5), Math.max(feet(brief, 3.5), bedH - bathH));
-      rooms.push(room(level, i === 0 ? "Attached bath" : `Bathroom ${i + 1}`, "bathroom", bedW, y, bathW, bathH));
+      rooms.push(room(level, i === 0 && wantsAttachedBath(brief) ? "Attached bath" : `Bathroom ${i + 1}`, "bathroom", bedW, y, bathW, bathH));
       if (i === 0) {
         const closetH = bedH - bathH;
         if (closetH >= feet(brief, 3)) rooms.push(room(level, "Wardrobe niche", "storage", bedW, y + bathH, bathW, closetH));
@@ -241,7 +256,7 @@ function makeNorthSouthPlan(brief: Brief, level: number, roadSide: "north" | "so
   if (bedroomCount >= 1) rooms.push(room(level, "Bedroom 1", "bedroom", 0, privateTop, bedW, privateD));
   if (bedroomCount >= 2) rooms.push(room(level, "Bedroom 2", "bedroom", bedW, privateTop, bedW, privateD));
   if (brief.bathrooms >= 1) {
-    rooms.push(room(level, "Attached bath", "bathroom", bedW * 2, privateTop, bathW, bathD));
+    rooms.push(room(level, wantsAttachedBath(brief) ? "Attached bath" : "Bathroom 1", "bathroom", bedW * 2, privateTop, bathW, bathD));
     if (brief.bathrooms >= 2) rooms.push(room(level, "Bathroom 2", "bathroom", bedW * 2, privateTop + bathD, bathW, bathD));
     const usedBathD = brief.bathrooms >= 2 ? bathD * 2 : bathD;
     const storageD = privateD - usedBathD;
@@ -290,6 +305,14 @@ function generateOpenings(plan: FloorPlan, brief: Brief): Opening[] {
     if (doorWall && accessRoom && !isDoorlessCirculation(r)) {
       const width = Math.min(doorWidth, doorWall === "north" || doorWall === "south" ? r.width * 0.35 : r.depth * 0.35);
       openings.push({ id: `door-${r.id}`, kind: "door", wall: doorWall, roomId: r.id, offset: doorOffset(r, accessRoom, doorWall, width), width });
+    }
+    if (r.type === "stairs") {
+      plan.rooms.filter(other => other.id !== r.id && other.id !== accessRoom?.id && isDoorTarget(r, other) && sharedWall(r, other)).forEach((target, index) => {
+        const wall = sharedWall(r, target);
+        if (!wall) return;
+        const width = Math.min(doorWidth, wall === "north" || wall === "south" ? r.width * 0.35 : r.depth * 0.35);
+        openings.push({ id: `door-${r.id}-${index + 2}`, kind: "door", wall, roomId: r.id, offset: doorOffset(r, target, wall, width), width });
+      });
     }
     const exterior = exteriorWall(r, plan);
     if (exterior && !["hallway", "foyer", "stairs", "garage", "porch", "open"].includes(r.type)) openings.push({ id: `window-${r.id}`, kind: "window", wall: exterior, roomId: r.id, offset: 0.5, width: Math.min(feet(brief, 5), exterior === "north" || exterior === "south" ? r.width * 0.55 : r.depth * 0.55) });

@@ -11,10 +11,10 @@ after(async () => {
   await vite.close();
 });
 
-const { createProject, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
+const { createProject, finalPlanErrors, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
 const { evaluateArchitecture } = await vite.ssrLoadModule("/app/architecture-validator.ts");
 const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasibility.ts");
-const { exteriorWalls, isCirculationLike, needsWetVentilation, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
+const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
 
 function makeBrief(overrides) {
   return {
@@ -83,7 +83,7 @@ function assertAccessOpenings(plan, brief) {
     if (room.type === "bedroom") assert.ok(targets.some(isCirculationLike), `${room.name} needs a circulation door`);
     if (room.type === "bathroom") {
       const attached = room.name.toLowerCase().includes("attached");
-      assert.ok(targets.some(target => isCirculationLike(target) || (attached && target.type === "bedroom")), `${room.name} needs a valid door`);
+      assert.ok(targets.some(target => attached ? target.type === "bedroom" : isCirculationLike(target)), attached ? `${room.name} needs a bedroom door` : `${room.name} needs a circulation door`);
     }
     if (["stairs", "utility", "laundry", "pantry", "study"].includes(room.type)) assert.ok(targets.length > 0, `${room.name} needs a usable door`);
     if (room.type === "garage") {
@@ -104,6 +104,27 @@ function assertWetVentilation(plan) {
   }
 }
 
+function assertNoOversizedSecondaryHallways(plan) {
+  for (const room of plan.rooms.filter(room => room.type === "hallway")) {
+    if (/central|entry|bedroom/i.test(room.name)) continue;
+    assert.ok(room.width * room.depth <= 80, `${room.name} should not become a large leftover hallway`);
+  }
+}
+
+function assertRoomPlacement(plan, type, sides, maxDistance, label = type) {
+  const rooms = plan.rooms.filter(room => room.type === type || (type === "dining" && room.name.toLowerCase().includes("dining")));
+  assert.ok(rooms.length > 0, `${label} room exists for placement check`);
+  const best = Math.min(...rooms.map(room => Math.max(...sides.map(side => placementDistance(room, plan, side)))));
+  assert.ok(best <= maxDistance, `${label} should be near ${sides.join("+")} but distance was ${best.toFixed(2)}`);
+}
+
+function assertRoomRatio(plan, type, maxRatio, label = type) {
+  const rooms = plan.rooms.filter(room => room.type === type || (type === "dining" && room.name.toLowerCase().includes("dining")));
+  assert.ok(rooms.length > 0, `${label} room exists for ratio check`);
+  const worst = Math.max(...rooms.map(room => Math.max(room.width, room.depth) / Math.max(0.01, Math.min(room.width, room.depth))));
+  assert.ok(worst <= maxRatio, `${label} should not be corridor-like; ratio was ${worst.toFixed(2)}`);
+}
+
 function assertQuality(brief, expectations = {}) {
   const feasibility = evaluateBriefFeasibility(brief);
   assert.equal(feasibility.canGenerate, true, `feasibility issues:\n${feasibility.errors.join("\n")}`);
@@ -114,8 +135,11 @@ function assertQuality(brief, expectations = {}) {
   const blocking = [...geometryErrors, ...architecture.errors];
 
   assert.deepEqual(blocking, [], `blocking issues:\n${blocking.join("\n")}`);
+  assert.deepEqual(finalPlanErrors(brief, plan), [], "final plan gate");
   assertAccessOpenings(plan, brief);
   assertWetVentilation(plan);
+  assertNoOversizedSecondaryHallways(plan);
+  for (const room of plan.rooms) assert.equal(roomExceedsMaximum(room, brief), false, `${room.name} should stay within recommended maximum size`);
   assert.equal(plan.width, brief.plotWidth);
   assert.equal(plan.depth, brief.plotDepth);
   assert.ok(roomCount(plan, "bedroom") >= brief.bedrooms, "bedroom count");
@@ -130,6 +154,10 @@ function assertQuality(brief, expectations = {}) {
   if (expectations.pantry) assert.ok(roomCount(plan, "pantry") >= 1, "pantry count");
   if (expectations.study) assert.ok(roomCount(plan, "study") >= 1, "study count");
   if (expectations.roundedLiving) assert.ok(plan.rooms.some(room => room.type === "living" && room.shape === "rounded"), "rounded living room");
+  if (expectations.noAttachedBath) assert.equal(project.plans.flatMap(plan => plan.rooms).some(room => /attached/i.test(room.name)), false, "should not invent attached bath labels");
+  expectations.placements?.forEach(check => assertRoomPlacement(plan, check.type, check.sides, check.maxDistance, check.label));
+  expectations.maxRatios?.forEach(check => assertRoomRatio(plan, check.type, check.maxRatio, check.label));
+  if (expectations.noWarnings) assert.deepEqual(architecture.warnings, [], "architecture warnings");
   assert.ok(architecture.score >= (expectations.minScore ?? 70), `architecture score ${architecture.score}`);
   return { plan, architecture };
 }
@@ -164,7 +192,23 @@ test("30x40 south-facing compact 2BHK with porch and rounded living room", () =>
     roadSide: "south",
     features: ["internal_staircase", "porch", "open_space"],
     adjacency: ["bedrooms open to circulation", "rounded living room front-right"],
-  }), { porch: true, stairs: true, roundedLiving: true, minScore: 70 });
+  }), {
+    porch: true,
+    stairs: true,
+    roundedLiving: true,
+    minScore: 70,
+    placements: [
+      { type: "living", sides: ["south", "east"], maxDistance: 0.45, label: "rounded living front-right" },
+      { type: "kitchen", sides: ["north"], maxDistance: 0.2, label: "kitchen rear" },
+      { type: "bedroom", sides: ["west"], maxDistance: 0.25, label: "bedrooms left side" },
+      { type: "dining", sides: ["center"], maxDistance: 0.32, label: "open dining center" },
+      { type: "porch", sides: ["south", "east"], maxDistance: 0.22, label: "porch front-right" },
+    ],
+    maxRatios: [
+      { type: "dining", maxRatio: 1.8, label: "open dining area" },
+    ],
+    noWarnings: true,
+  });
 });
 
 test("28x42 south-facing 3BHK with full bath, half bath, laundry, and central hallway", () => {
@@ -179,7 +223,14 @@ test("28x42 south-facing 3BHK with full bath, half bath, laundry, and central ha
     roadSide: "south",
     features: ["laundry"],
     adjacency: ["bedrooms open to hallway", "laundry near kitchen and bath"],
-  }), { minScore: 68 });
+  }), {
+    minScore: 68,
+    placements: [
+      { type: "living", sides: ["south", "west"], maxDistance: 0.28, label: "living front-left" },
+      { type: "kitchen", sides: ["south", "east"], maxDistance: 0.28, label: "kitchen front-right" },
+      { type: "bathroom", sides: ["east"], maxDistance: 0.32, label: "bath right side" },
+    ],
+  });
 });
 
 test("26x36 west-facing 1BHK keeps compact rooms above minimum sizes", () => {
@@ -206,7 +257,7 @@ test("32x44 north-facing 2BHK without dining keeps both bathrooms", () => {
     facing: "north",
     roadSide: "north",
     features: ["utility", "porch", "internal_staircase"],
-  }), { porch: true, stairs: true, utility: true, minScore: 90 });
+  }), { porch: true, stairs: true, utility: true, noAttachedBath: true, minScore: 90 });
 });
 
 test("36x54 west-facing 2BHK supports mirrored road side with garage and stairs", () => {
@@ -248,4 +299,58 @@ test("impossibly tight briefs are reported as blocking instead of accepted", () 
     features: ["garage"],
   }));
   assert.ok(blocking.some(message => /minimum|smaller|outside|missing/i.test(message)), blocking.join("\n"));
+});
+
+test("attached bathrooms require a direct bedroom door", () => {
+  const brief = makeBrief({
+    prompt: "Create a 40 ft x 60 ft east-facing house with 1 bedroom and 1 attached bathroom.",
+    bedrooms: 1,
+    bathrooms: 1,
+    diningRooms: 0,
+    features: [],
+    adjacency: ["attached bathroom"],
+  });
+  const plan = {
+    id: "bad-attached",
+    level: 0,
+    elevation: 0,
+    width: 40,
+    depth: 60,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "hall", name: "Central hallway", type: "hallway", x: 12, y: 0, width: 4, depth: 60, color: "#fff" },
+      { id: "bed", name: "Bedroom 1", type: "bedroom", x: 0, y: 10, width: 12, depth: 12, color: "#fff" },
+      { id: "bath", name: "Attached bath", type: "bathroom", x: 16, y: 10, width: 6, depth: 8, color: "#fff" },
+      { id: "foyer", name: "Foyer", type: "foyer", x: 16, y: 0, width: 24, depth: 10, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "foyer-hall", kind: "door", wall: "west", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "bed-door", kind: "door", wall: "east", roomId: "bed", offset: 0.5, width: 3 },
+      { id: "bath-hall", kind: "door", wall: "west", roomId: "bath", offset: 0.5, width: 3 },
+      { id: "bed-window", kind: "window", wall: "west", roomId: "bed", offset: 0.5, width: 4 },
+      { id: "bath-vent", kind: "vent", wall: "west", roomId: "bath", offset: 0.5, width: 2 },
+    ],
+  };
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /direct door to a bedroom/i.test(message)), report.errors.join("\n"));
+});
+
+test("bathrooms are not labeled attached unless requested", () => {
+  const project = createProject(makeBrief({
+    prompt: "Create a 32 ft x 44 ft north-facing two floor home with 2 bedrooms, 2 bathrooms, living room, kitchen, utility and internal staircase. Road on north side. Do not create an ensuite.",
+    floors: 2,
+    plotWidth: 32,
+    plotDepth: 44,
+    bedrooms: 2,
+    bathrooms: 2,
+    diningRooms: 0,
+    facing: "north",
+    roadSide: "north",
+    features: ["utility", "internal_staircase"],
+  }));
+  const attachedRooms = project.plans.flatMap(plan => plan.rooms).filter(room => /attached/i.test(room.name));
+  assert.deepEqual(attachedRooms.map(room => room.name), []);
 });

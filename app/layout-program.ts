@@ -1,5 +1,5 @@
 import { Brief, RoomType, WallSide } from "./studio-types";
-import { ROOM_RULES, toUnit } from "./layout-rules";
+import { ROOM_RULES, toUnit, wantsAttachedBath } from "./layout-rules";
 
 export type PlacementHint =
   | "front"
@@ -70,7 +70,7 @@ export function buildLayoutProgram(brief: Brief): LayoutProgram {
   for (let i = 0; i < brief.diningRooms; i++) rooms.push(req(brief, `dining-${i + 1}`, brief.diningRooms > 1 ? `Dining area ${i + 1}` : "Dining area", "dining", ["center", "near_kitchen"]));
   for (let i = 0; i < brief.bedrooms; i++) rooms.push(req(brief, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", ["rear", "exterior", "near_bath"]));
   for (let i = 0; i < brief.bathrooms; i++) {
-    const attached = i === 0 && /attached|ensuite|en-suite/i.test(brief.prompt);
+    const attached = i === 0 && wantsAttachedBath(brief);
     rooms.push(req(brief, `bathroom-${i + 1}`, attached ? "Attached bath" : /half bath|powder|toilet/i.test(brief.prompt) && i === brief.bathrooms - 1 ? "Half bath" : `Bathroom ${i + 1}`, "bathroom", ["near_bedrooms", "near_bath"], attached ? { attachedTo: "bedroom-1" } : {}));
   }
   if (brief.features.includes("garage")) rooms.push(req(brief, "garage-1", "Garage", "garage", ["front", "road_side"]));
@@ -89,4 +89,3 @@ export function buildLayoutProgram(brief: Brief): LayoutProgram {
 
   return { rooms, edges };
 }
-
