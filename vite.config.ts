@@ -11,6 +11,15 @@ const { d1, r2 } = hostingConfig;
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 
+// React Server Components are environment-specific runtime entrypoints. Vite's
+// dependency optimizer can otherwise cache the RSC edge entry under a generated
+// filename that changes after lockfile/config updates, leaving a stale import.
+const rscOptimizerExcludes = [
+  "react-server-dom-webpack",
+  "react-server-dom-webpack/server",
+  "react-server-dom-webpack/server.edge",
+];
+
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
@@ -44,6 +53,11 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    optimizeDeps: { exclude: rscOptimizerExcludes },
+    environments: {
+      rsc: { optimizeDeps: { exclude: rscOptimizerExcludes } },
+      ssr: { optimizeDeps: { exclude: rscOptimizerExcludes } },
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
