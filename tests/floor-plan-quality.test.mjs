@@ -16,6 +16,7 @@ const { evaluateArchitecture } = await vite.ssrLoadModule("/app/architecture-val
 const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasibility.ts");
 const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
 const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
+const { buildPlan3DGeometry } = await vite.ssrLoadModule("/app/plan-3d-geometry.ts");
 
 function makeBrief(overrides) {
   return {
@@ -565,4 +566,32 @@ test("API normalizer recovers omitted prompt features without adding negated one
   assert.ok(brief.features.includes("internal_staircase"), "staircase should be recovered from prompt");
   assert.ok(brief.features.includes("utility"), "utility should be recovered from prompt");
   assert.equal(brief.features.includes("study"), false, "negated study must not be recovered");
+});
+
+test("3D geometry merges shared walls and cuts door gaps", () => {
+  const plan = {
+    id: "two-room-plan",
+    level: 0,
+    elevation: 0,
+    width: 20,
+    depth: 10,
+    unit: "feet",
+    facing: "south",
+    roadSide: "south",
+    rooms: [
+      { id: "living", name: "Living", type: "living", x: 0, y: 0, width: 10, depth: 10, color: "#fff" },
+      { id: "kitchen", name: "Kitchen", type: "kitchen", x: 10, y: 0, width: 10, depth: 10, color: "#fff" },
+    ],
+    openings: [
+      { id: "living-kitchen-door", kind: "door", wall: "east", roomId: "living", offset: 0.5, width: 4 },
+    ],
+  };
+
+  const geometry = buildPlan3DGeometry(plan);
+  const sharedWallPieces = geometry.walls.filter(wall => wall.kind === "interior" && wall.orientation === "vertical" && Math.abs(wall.x1 - 10) < 0.03);
+  const totalSharedLength = sharedWallPieces.reduce((sum, wall) => sum + wall.z2 - wall.z1, 0);
+
+  assert.equal(totalSharedLength, 6);
+  assert.ok(sharedWallPieces.every(wall => wall.thickness < 0.3), "shared partitions should use interior wall thickness");
+  assert.equal(geometry.walls.filter(wall => wall.kind === "exterior").length, 4);
 });

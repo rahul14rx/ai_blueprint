@@ -3,11 +3,25 @@ import { Canvas } from "@react-three/fiber";
 import { Environment, FirstPersonControls, Grid, OrbitControls, Text } from "@react-three/drei";
 import { Suspense } from "react";
 import { FloorPlan, MaterialSet, Room } from "./studio-types";
+import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
 
 function Wall({ position, size, color, id, selected, onSelect }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void }) {
   return <mesh position={position} castShadow receiveShadow onClick={e => { e.stopPropagation(); onSelect(id); }}>
     <boxGeometry args={size} /><meshStandardMaterial color={selected ? "#EF7545" : color} roughness={.72} />
   </mesh>;
+}
+
+function SharedWall({ wall, y, selectedId, onSelect }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void }) {
+  const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
+  const position: [number, number, number] = wall.orientation === "horizontal"
+    ? [(wall.x1 + wall.x2) / 2, y + wall.height / 2, wall.z1]
+    : [wall.x1, y + wall.height / 2, (wall.z1 + wall.z2) / 2];
+  const size: [number, number, number] = wall.orientation === "horizontal"
+    ? [length, wall.height, wall.thickness]
+    : [wall.thickness, wall.height, length];
+  const color = wall.kind === "exterior" ? "#F5F2EA" : "#FFFFFF";
+
+  return <Wall id={wall.id} selected={selectedId === wall.id} onSelect={onSelect} position={position} size={size} color={color} />;
 }
 
 function Furniture({ room, y, color }: { room: Room; y: number; color: string }) {
@@ -19,18 +33,14 @@ function Furniture({ room, y, color }: { room: Room; y: number; color: string })
   </group>;
 }
 
-function RoomGeometry({ room, plan, material, activeFloor, showCeiling, cutaway, selectedId, onSelect, interiors }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; cutaway: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean }) {
-  const y = plan.elevation; const h = 2.8; const t = .14; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
+function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean }) {
+  const y = plan.elevation; const h = 9; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
   const visible = activeFloor === -1 || activeFloor === plan.level;
   if (!visible) return null;
   return <group>
     <mesh position={[cx, y + .04, cz]} receiveShadow onClick={e => { e.stopPropagation(); onSelect(room.id); }}>
       <boxGeometry args={[room.width - .08, .08, room.depth - .08]} /><meshStandardMaterial color={selectedId === room.id ? "#F2A17D" : material.floor} roughness={.76} />
     </mesh>
-    <Wall id={`${room.id}:north`} selected={selectedId === `${room.id}:north`} onSelect={onSelect} position={[cx, y + h / 2, room.y]} size={[room.width, h, t]} color={material.wall} />
-    {!cutaway && <Wall id={`${room.id}:south`} selected={selectedId === `${room.id}:south`} onSelect={onSelect} position={[cx, y + h / 2, room.y + room.depth]} size={[room.width, h, t]} color={material.wall} />}
-    <Wall id={`${room.id}:west`} selected={selectedId === `${room.id}:west`} onSelect={onSelect} position={[room.x, y + h / 2, cz]} size={[t, h, room.depth]} color={material.wall} />
-    {!cutaway && <Wall id={`${room.id}:east`} selected={selectedId === `${room.id}:east`} onSelect={onSelect} position={[room.x + room.width, y + h / 2, cz]} size={[t, h, room.depth]} color={material.wall} />}
     {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9} /></mesh>}
     {interiors && <Furniture room={room} y={y} color={material.accent} />}
     <Text position={[cx, y + .08, cz]} rotation={[-Math.PI/2, 0, 0]} fontSize={.24} color="#3E4D45" anchorX="center" anchorY="middle">{room.name}</Text>
@@ -41,10 +51,21 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
   const width = plans[0]?.width || 14; const depth = plans[0]?.depth || 18;
   return <div className="three-canvas">
     <Canvas shadows camera={{ position: [width * 1.15, 12, depth * 1.2], fov: 42 }} onPointerMissed={() => onSelect("")}>
-      <color attach="background" args={["#E9EFE9"]} /><fog attach="fog" args={["#E9EFE9", 35, 75]} />
+      <color attach="background" args={["#E9EFE9"]} />
       <ambientLight intensity={1.25} /><directionalLight position={[10, 18, 8]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />
       <Suspense fallback={null}>
-        <group position={[-width/2, 0, -depth/2]}>{plans.flatMap(plan => plan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={plan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} cutaway={cutaway} selectedId={selectedId} onSelect={onSelect} interiors={interiors} />))}</group>
+        <group position={[-width/2, 0, -depth/2]}>
+          {plans.flatMap(plan => {
+            const visible = activeFloor === -1 || activeFloor === plan.level;
+            if (!visible) return [];
+            const geometry = buildPlan3DGeometry(plan);
+            const walls = cutaway ? geometry.walls.filter(wall => !(wall.kind === "exterior" && (wall.x1 >= plan.width - 0.03 || wall.z1 >= plan.depth - 0.03))) : geometry.walls;
+            return [
+              ...plan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={plan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} />),
+              ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={plan.elevation} selectedId={selectedId} onSelect={onSelect} />),
+            ];
+          })}
+        </group>
         <Environment preset="apartment" />
       </Suspense>
       <Grid args={[80, 80]} cellSize={1} cellThickness={.5} cellColor="#9DAAA2" sectionSize={5} sectionThickness={1} sectionColor="#728078" fadeDistance={55} infiniteGrid />
