@@ -1,5 +1,5 @@
 import { Brief, FloorPlan, Opening, Room, RoomType } from "./studio-types";
-import { ROOM_RULES, exteriorWalls, isCirculationLike, needsWetVentilation, requiresDirectKitchenDining, roomExceedsMaximum, roomMatches, roomMeetsMinimum, roomsTouch, sharedWall, toUnit } from "./layout-rules";
+import { ROOM_RULES, exteriorWalls, isCirculationLike, needsWetVentilation, requiresDirectKitchenDining, requiresPassableKitchenDining, roomExceedsMaximum, roomMatches, roomMeetsMinimum, roomsTouch, sharedWall, toUnit } from "./layout-rules";
 
 export type ArchitectureIssue = {
   severity: "error" | "warning";
@@ -42,6 +42,10 @@ function hasBorrowedLight(room: Room, plan: FloorPlan) {
 function roomHasRoadDoor(room: Room, plan: FloorPlan, brief: Brief) {
   const roadSide = brief.roadSide !== "unspecified" ? brief.roadSide : brief.facing;
   return roadSide !== "unspecified" && exteriorWalls(room, plan).includes(roadSide) && plan.openings.some(opening => opening.roomId === room.id && opening.kind === "door" && opening.wall === roadSide);
+}
+
+function planHasMainEntryDoor(plan: FloorPlan, brief: Brief) {
+  return plan.rooms.some(room => isCirculationLike(room) && roomHasRoadDoor(room, plan, brief));
 }
 
 function openingSpan(owner: Room, opening: Opening) {
@@ -151,6 +155,14 @@ function anyAdjacent(plan: FloorPlan, first: RoomType, second: RoomType) {
   return plan.rooms.some(a => roomMatches(a, first) && plan.rooms.some(b => roomMatches(b, second) && roomsTouch(a, b)));
 }
 
+function anyPassableConnection(plan: FloorPlan, first: RoomType, second: RoomType) {
+  return plan.rooms.some(a => roomMatches(a, first) && plan.rooms.some(b => {
+    if (!roomMatches(b, second) || !roomsTouch(a, b)) return false;
+    if (a.name.toLowerCase().includes("open") || b.name.toLowerCase().includes("open")) return true;
+    return doorTargetsForRoom(a, plan).some(target => target.id === b.id) || doorTargetsForRoom(b, plan).some(target => target.id === a.id);
+  }));
+}
+
 function overlapAmount(a1: number, a2: number, b1: number, b2: number) {
   return Math.min(a2, b2) - Math.max(a1, b1);
 }
@@ -186,6 +198,10 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
   if (brief.kitchens > 0 && countRooms(plan, "kitchen") < brief.kitchens) add(issues, "error", "brief", "Plan is missing the requested kitchen.");
   if (brief.diningRooms > 0 && countRooms(plan, "dining") < brief.diningRooms) add(issues, "error", "brief", "Plan is missing the requested dining area.");
   if (brief.livingRooms > 0 && countRooms(plan, "living") < brief.livingRooms) add(issues, "error", "brief", "Plan is missing the requested living/great room.");
+
+  if ((brief.roadSide !== "unspecified" || brief.facing !== "unspecified") && !planHasMainEntryDoor(plan, brief)) {
+    add(issues, "error", "road", "Main entry/gate must be shown on the road-facing side.");
+  }
 
   plan.rooms.forEach(room => {
     const rule = ROOM_RULES[room.type];
@@ -224,6 +240,9 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
   if (brief.kitchens > 0 && brief.diningRooms > 0 && !anyAdjacent(plan, "kitchen", "dining")) {
     if (requiresDirectKitchenDining(brief)) add(issues, "error", "adjacency", "Kitchen should be directly adjacent to the dining area.");
     else add(issues, "warning", "adjacency", "Kitchen is near but not directly adjacent to the dining area.");
+  }
+  if (brief.kitchens > 0 && brief.diningRooms > 0 && requiresPassableKitchenDining(brief) && !anyPassableConnection(plan, "kitchen", "dining")) {
+    add(issues, "error", "adjacency", "Kitchen and dining must have a passable door or open connection.");
   }
   if (brief.features.includes("utility") && !anyAdjacent(plan, "kitchen", "utility") && !anyAdjacent(plan, "utility", "hallway")) add(issues, "warning", "adjacency", "Utility should connect near the kitchen or service passage.");
   if (brief.bedrooms > 0 && brief.bathrooms > 0 && !anyAdjacent(plan, "bedroom", "bathroom") && !anyNearAcrossHall(plan, "bedroom", "bathroom")) add(issues, "warning", "adjacency", "At least one bathroom should sit beside a bedroom zone.");

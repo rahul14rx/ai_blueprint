@@ -1,17 +1,7 @@
 export const runtime = "nodejs";
 
-import type { Brief } from "../../studio-types";
+import { normalizeParsedRequirements } from "../../requirement-normalizer";
 
-const DIRECTIONS = ["north", "south", "east", "west", "unspecified"] as const;
-const FEATURES = ["garage", "internal_staircase", "utility", "balcony", "study", "pantry", "laundry", "porch", "open_space", "prayer_room", "roof_garden"] as const;
-const LAYOUT_TYPES = ["compact", "open", "villa", "duplex", "courtyard", "unspecified"] as const;
-const CIRCULATION_STYLES = ["central_spine", "side_spine", "loop", "foyer_split", "courtyard_ring", "unspecified"] as const;
-const ZONING_PREFERENCES = ["public_front", "private_rear", "split_bedrooms", "service_side", "unspecified"] as const;
-const GARAGE_MODES = ["none", "front", "side", "rear", "unspecified"] as const;
-const WET_CORE_PREFERENCES = ["side", "center", "stacked", "split", "unspecified"] as const;
-
-type Direction = (typeof DIRECTIONS)[number];
-type Feature = (typeof FEATURES)[number];
 type GeminiGenerateResponse = {
   error?: { message?: string; status?: string; code?: number };
   candidates?: Array<{
@@ -31,65 +21,6 @@ function readGeminiJson(response: GeminiGenerateResponse) {
     throw new Error(`Gemini returned an empty response${candidate?.finishReason ? ` with finish reason ${candidate.finishReason}` : ""}.`);
   }
   return JSON.parse(cleanJsonText(text));
-}
-
-function asNumber(value: unknown, fallback: number, min: number, max: number) {
-  const number = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.min(max, Math.max(min, number));
-}
-
-function asInteger(value: unknown, fallback: number, min: number, max: number) {
-  return Math.round(asNumber(value, fallback, min, max));
-}
-
-function asDirection(value: unknown): Direction {
-  const lower = String(value ?? "unspecified").toLowerCase();
-  return DIRECTIONS.includes(lower as Direction) ? lower as Direction : "unspecified";
-}
-
-function asStringArray(value: unknown) {
-  return Array.isArray(value) ? value.filter(item => typeof item === "string").map(item => item.trim()).filter(Boolean) : [];
-}
-
-function asFeatures(value: unknown): Feature[] {
-  return asStringArray(value).map(item => item.toLowerCase().replaceAll(" ", "_")).filter((item): item is Feature => FEATURES.includes(item as Feature));
-}
-
-function asEnum<T extends readonly string[]>(value: unknown, allowed: T, fallback: T[number]): T[number] {
-  const normalized = String(value ?? fallback).toLowerCase().replaceAll(" ", "_");
-  return allowed.includes(normalized) ? normalized as T[number] : fallback;
-}
-
-function normalizeBrief(value: Record<string, unknown>, prompt: string): Brief {
-  const style = typeof value.style === "string" && value.style.trim() ? value.style.trim() : "Modern";
-  const rawIntent = typeof value.layoutIntent === "object" && value.layoutIntent ? value.layoutIntent as Record<string, unknown> : {};
-  return {
-    title: typeof value.title === "string" && value.title.trim() ? value.title.trim() : "Custom Home Concept",
-    prompt,
-    plotWidth: asNumber(value.plotWidth, 40, 8, 1000),
-    plotDepth: asNumber(value.plotDepth, 60, 8, 1000),
-    unit: String(value.unit).toLowerCase().startsWith("met") ? "metres" : "feet",
-    floors: asInteger(value.floors, 1, 1, 3),
-    bedrooms: asInteger(value.bedrooms, 0, 0, 12),
-    bathrooms: asInteger(value.bathrooms, 0, 0, 12),
-    livingRooms: asInteger(value.livingRooms, 1, 0, 4),
-    kitchens: asInteger(value.kitchens, 1, 0, 4),
-    diningRooms: asInteger(value.diningRooms, 1, 0, 4),
-    style: style[0].toUpperCase() + style.slice(1),
-    facing: asDirection(value.facing),
-    roadSide: asDirection(value.roadSide),
-    features: asFeatures(value.features),
-    adjacency: asStringArray(value.adjacency),
-    warnings: asStringArray(value.warnings),
-    layoutIntent: {
-      layoutType: asEnum(rawIntent.layoutType, LAYOUT_TYPES, "unspecified"),
-      circulationStyle: asEnum(rawIntent.circulationStyle, CIRCULATION_STYLES, "unspecified"),
-      zoningPreference: asEnum(rawIntent.zoningPreference, ZONING_PREFERENCES, "unspecified"),
-      garageMode: asEnum(rawIntent.garageMode, GARAGE_MODES, "unspecified"),
-      wetCorePreference: asEnum(rawIntent.wetCorePreference, WET_CORE_PREFERENCES, "unspecified"),
-    },
-  };
 }
 
 function toFriendlyError(message: string) {
@@ -129,6 +60,7 @@ export async function POST(request: Request) {
             "Extract this prompt into this exact JSON shape:",
             `{"title":"string","plotWidth":number,"plotDepth":number,"unit":"feet|metres","floors":1,"bedrooms":0,"bathrooms":0,"livingRooms":0,"kitchens":0,"diningRooms":0,"style":"string","facing":"north|south|east|west|unspecified","roadSide":"north|south|east|west|unspecified","features":["garage|internal_staircase|utility|balcony|study|pantry|laundry|porch|open_space|prayer_room|roof_garden"],"adjacency":["string"],"warnings":["string"],"layoutIntent":{"layoutType":"compact|open|villa|duplex|courtyard|unspecified","circulationStyle":"central_spine|side_spine|loop|foyer_split|courtyard_ring|unspecified","zoningPreference":"public_front|private_rear|split_bedrooms|service_side|unspecified","garageMode":"none|front|side|rear|unspecified","wetCorePreference":"side|center|stacked|split|unspecified"}}`,
             "Never invent dimensions, room counts, plot facing, or road direction.",
+            "Never include a feature that the user negates. For example, \"no study\", \"do not add a flex room\", \"without garage\", or \"pantry not required\" must exclude that feature.",
             "Count half baths, powder rooms, and toilet rooms as bathrooms in the bathrooms number.",
             "If the prompt asks for laundry, include \"laundry\" in features. If it asks for utility, include \"utility\" in features. If it asks for porch, veranda, or front sit-out, include \"porch\" in features. If it asks for open plan or open dining, include \"open_space\" in features.",
             "Preserve important placement requirements like front-left, front-right, center-right, near kitchen, near bath, and opens to hallway in adjacency.",
@@ -149,7 +81,7 @@ export async function POST(request: Request) {
     if (!response.ok) throw new Error(data.error?.message || `Gemini request failed with status ${response.status}.`);
 
     const parsed = readGeminiJson(data);
-    return Response.json(normalizeBrief(parsed as Record<string, unknown>, prompt.trim()));
+    return Response.json(normalizeParsedRequirements(parsed as Record<string, unknown>, prompt.trim()));
   } catch (error) {
     const message = error instanceof Error ? error.message : "The AI request failed.";
     console.error("Requirement parser failed:", message);

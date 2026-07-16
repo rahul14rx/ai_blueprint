@@ -1,6 +1,6 @@
 import { Brief, FloorPlan, Opening, Project, ROOM_COLORS, Room, RoomType, PRESETS } from "./studio-types";
 import { optimizeGroundFloor } from "./layout-optimizer";
-import { needsWetVentilation, roomMeetsMinimum, wantsAttachedBath } from "./layout-rules";
+import { needsWetVentilation, removeNegatedFeatures, requestedOptionalFeaturesFromText, roomMeetsMinimum, wantsAttachedBath } from "./layout-rules";
 import { evaluateArchitecture } from "./architecture-validator";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -11,22 +11,96 @@ const overlap = (a1: number, a2: number, b1: number, b2: number) => Math.min(a2,
 const feet = (brief: Brief, value: number) => brief.unit === "feet" ? value : value * 0.3048;
 const target = (brief: Brief, min: number, ideal: number, max: number, available: number) => clamp(feet(brief, ideal), feet(brief, min), Math.min(feet(brief, max), available));
 const wantsRoundedLiving = (brief: Brief) => /\b(round|rounded|curved|curve|semi[-\s]?circular|circular)\b.*\b(living|lounge|great room)\b|\b(living|lounge|great room)\b.*\b(round|rounded|curved|curve|semi[-\s]?circular|circular)\b/i.test(brief.prompt);
+const OPTIONAL_FEATURES = ["garage", "internal_staircase", "utility", "balcony", "roof_garden", "study", "pantry", "laundry", "porch", "open_space", "prayer_room"];
+const NUMBER_WORDS: Record<string, number> = { one: 1, single: 1, two: 2, double: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+type Direction = "north" | "south" | "east" | "west";
+
+function numberValue(value: string | undefined) {
+  if (!value) return undefined;
+  const lower = value.toLowerCase();
+  const parsed = Number(lower);
+  return Number.isFinite(parsed) ? parsed : NUMBER_WORDS[lower];
+}
+
+function firstCount(text: string, pattern: RegExp) {
+  const match = text.match(pattern);
+  return numberValue(match?.[1]);
+}
+
+function inferFloorCount(text: string) {
+  if (/\b(single|one)[-\s]?(floor|storey|story)\b|\bground[-\s]?floor\b|\bsingle[-\s]?floor\b/.test(text)) return 1;
+  return firstCount(text, /\b(\d+|one|two|three)\s*(?:floor|storey|story)\b/);
+}
+
+function inferBathroomCount(text: string) {
+  const generic = firstCount(text, /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:bathrooms?|baths?)\b/);
+  const specific = [...text.matchAll(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:full|common|attached|ensuite|en-suite|half|powder|toilet)\s*(?:bathrooms?|baths?|toilets?|rooms?)\b/g)]
+    .reduce((sum, match) => sum + (numberValue(match[1]) ?? 0), 0);
+  if (specific > 0) return Math.max(generic ?? 0, specific);
+  if (/\b(half bath|powder room|toilet room)\b/.test(text)) return Math.max(generic ?? 0, 1);
+  return generic;
+}
+
+function isRoomNegated(text: string, labels: string[]) {
+  return labels.some(label => {
+    const phrase = label.replace(/\s+/g, "[-\\s]+");
+    return new RegExp(`\\b(no|not|without|avoid|exclude|skip)\\b[^.?!;\\n]{0,35}\\b${phrase}\\b|\\b${phrase}\\b[^.?!;\\n]{0,35}\\b(not required|not needed|not necessary)\\b`, "i").test(text);
+  });
+}
+
+function inferSharedRoomCount(text: string, labels: string[], defaultWhenMentioned = 1) {
+  if (isRoomNegated(text, labels)) return 0;
+  const labelPattern = labels.map(label => label.replace(/\s+/g, "[-\\s]+")).join("|");
+  const counted = firstCount(text, new RegExp(`\\b(\\d+|one|two|three|four)\\s*(?:${labelPattern})s?\\b`));
+  if (counted !== undefined) return counted;
+  return new RegExp(`\\b(?:${labelPattern})\\b`, "i").test(text) ? defaultWhenMentioned : undefined;
+}
+
+function inferPlot(text: string): Pick<Brief, "plotWidth" | "plotDepth" | "unit"> | null {
+  const match = text.match(/\b(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|m|meter|metre|meters|metres)?\s*(?:x|×|by)\s*(\d+(?:\.\d+)?)\s*(ft|feet|foot|m|meter|metre|meters|metres)\b/);
+  if (!match) return null;
+  return {
+    plotWidth: Number(match[1]),
+    plotDepth: Number(match[2]),
+    unit: /^m|met/i.test(match[3]) ? "metres" : "feet",
+  };
+}
+
+function inferFacing(text: string): Direction | undefined {
+  const match = text.match(/\b(north|south|east|west)[-\s]?facing\b/);
+  return match?.[1] as Direction | undefined;
+}
+
+function inferRoadSide(text: string): Direction | undefined {
+  const direct = text.match(/\b(?:road|main entry|entry|gate)\b[^.?!;\n]{0,45}\b(?:on|at|to|from)\s+(?:the\s+)?(north|south|east|west)\s+side\b/);
+  if (direct?.[1]) return direct[1] as Direction;
+  const reverse = text.match(/\b(north|south|east|west)\s+side\b[^.?!;\n]{0,45}\b(?:road|main entry|entry|gate)\b/);
+  return reverse?.[1] as Direction | undefined;
+}
 
 export function parseBrief(prompt: string, form: Partial<Brief>): Brief {
   const lower = prompt.toLowerCase();
-  const floorMatch = lower.match(/(\d+)\s*(?:floor|storey|story)/);
-  const bedMatch = lower.match(/(\d+)\s*(?:bed|bedroom)/);
-  const bathMatch = lower.match(/(\d+)\s*(?:bath|bathroom)/);
+  const inferredFloors = inferFloorCount(lower);
+  const inferredBedrooms = firstCount(lower, /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:bed|bedroom|bedrooms)\b/);
+  const inferredBathrooms = inferBathroomCount(lower);
+  const inferredLivingRooms = inferSharedRoomCount(lower, ["living room", "living", "great room", "lounge", "family room"]);
+  const inferredKitchens = inferSharedRoomCount(lower, ["kitchen"]);
+  const inferredDiningRooms = inferSharedRoomCount(lower, ["dining room", "dining area", "dining nook", "dining"]);
+  const inferredPlot = inferPlot(lower);
+  const inferredFacing = inferFacing(lower);
+  const inferredRoadSide = inferRoadSide(lower);
   const inferredStyle = ["modern", "minimal", "traditional", "luxury", "industrial"].find(s => lower.includes(s)) ?? "Modern";
+  const adjacency = form.adjacency || [];
+  const features = removeNegatedFeatures(form.features ?? requestedOptionalFeaturesFromText(prompt, OPTIONAL_FEATURES), prompt, adjacency);
   return {
-    title: form.title || "My Home Concept", prompt, floors: Math.min(3, Math.max(1, form.floors || Number(floorMatch?.[1]) || 2)),
-    plotWidth: Math.max(8, form.plotWidth || 14), plotDepth: Math.max(8, form.plotDepth || 18), unit: form.unit || "feet",
-    bedrooms: Math.max(1, form.bedrooms || Number(bedMatch?.[1]) || 3), bathrooms: Math.max(1, form.bathrooms || Number(bathMatch?.[1]) || 2),
-    livingRooms: form.livingRooms ?? 1, kitchens: form.kitchens ?? 1, diningRooms: form.diningRooms ?? 1,
+    title: form.title || "My Home Concept", prompt, floors: Math.min(3, Math.max(1, form.floors ?? inferredFloors ?? 1)),
+    plotWidth: Math.max(8, form.plotWidth ?? inferredPlot?.plotWidth ?? 14), plotDepth: Math.max(8, form.plotDepth ?? inferredPlot?.plotDepth ?? 18), unit: form.unit || inferredPlot?.unit || "feet",
+    bedrooms: Math.max(0, form.bedrooms ?? inferredBedrooms ?? 3), bathrooms: Math.max(0, form.bathrooms ?? inferredBathrooms ?? 2),
+    livingRooms: form.livingRooms ?? inferredLivingRooms ?? 1, kitchens: form.kitchens ?? inferredKitchens ?? 1, diningRooms: form.diningRooms ?? inferredDiningRooms ?? 1,
     style: form.style || inferredStyle[0].toUpperCase() + inferredStyle.slice(1),
-    facing: form.facing || "unspecified", roadSide: form.roadSide || "unspecified",
-    features: form.features || ["garage", "internal_staircase", "utility", "balcony", "roof_garden", "study", "pantry", "laundry", "porch", "open_space"].filter(feature => lower.includes(feature.replace("_", " "))),
-    adjacency: form.adjacency || [], warnings: form.warnings || [],
+    facing: form.facing || inferredFacing || "unspecified", roadSide: form.roadSide || inferredRoadSide || inferredFacing || "unspecified",
+    features,
+    adjacency, warnings: form.warnings || [],
   };
 }
 
@@ -206,7 +280,10 @@ function makeEastWestPlan(brief: Brief, level: number, roadSide: "east" | "west"
   if (brief.features.includes("internal_staircase")) rooms.push(room(level, "Internal stairs", "stairs", leftW + hallW, stairTop, rightW, Math.min(stairH, Math.max(feet(brief, 6), D - garageH - stairTop))));
   const lobbyTop = stairTop + (brief.features.includes("internal_staircase") ? Math.min(stairH, Math.max(feet(brief, 6), D - garageH - stairTop)) : 0);
   const lobbyH = D - garageH - lobbyTop;
-  if (lobbyH >= feet(brief, 4)) rooms.push(room(level, brief.features.includes("study") && lobbyH >= feet(brief, 8) ? "Study" : brief.features.includes("garage") ? "Mudroom / garage lobby" : "Flex room", brief.features.includes("study") && lobbyH >= feet(brief, 8) ? "study" : brief.features.includes("garage") ? "storage" : "study", leftW + hallW, lobbyTop, rightW, lobbyH));
+  if (lobbyH >= feet(brief, 4)) {
+    const requestedStudy = brief.features.includes("study") && lobbyH >= feet(brief, 8);
+    rooms.push(room(level, requestedStudy ? "Study" : brief.features.includes("garage") ? "Mudroom / garage lobby" : "Service pocket", requestedStudy ? "study" : "storage", leftW + hallW, lobbyTop, rightW, lobbyH));
+  }
   if (brief.features.includes("garage")) rooms.push(room(level, "Garage", "garage", leftW + hallW, D - garageH, rightW, garageH));
 
   for (let i = 0; i < bedroomRows; i++) {

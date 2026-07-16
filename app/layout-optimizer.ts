@@ -38,7 +38,7 @@ function shapeFor(req: RoomRequirement | undefined, curveSide: WallSide): Pick<R
 
 function leftoverSupportRoom(level: number, key: string, x: number, y: number, width: number, depth: number, brief: Brief): Room | null {
   if (width < toUnit(brief, 3) || depth < toUnit(brief, 3)) return null;
-  if (width >= toUnit(brief, 8) && depth >= toUnit(brief, 8)) return makeRoom(level, key, "Flex room", "study", x, y, width, depth);
+  if (width >= toUnit(brief, 8) && depth >= toUnit(brief, 8) && brief.features.includes("study")) return makeRoom(level, key, "Study", "study", x, y, width, depth);
   if (width >= toUnit(brief, 4) && depth >= toUnit(brief, 5)) return makeRoom(level, key, "Service pocket", "storage", x, y, width, depth);
   return makeRoom(level, key, "Access pocket", "hallway", x, y, width, depth);
 }

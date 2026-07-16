@@ -120,10 +120,59 @@ export function requiresDirectKitchenDining(brief: Brief) {
   return /kitchen[^.]{0,50}(beside|adjacent|next to|directly|connected|open to)[^.]{0,50}dining|dining[^.]{0,50}(beside|adjacent|next to|directly|connected|open to)[^.]{0,50}kitchen/.test(text);
 }
 
+export function requiresPassableKitchenDining(brief: Brief) {
+  const text = `${brief.prompt} ${brief.adjacency.join(" ")}`.toLowerCase();
+  return /kitchen[^.]{0,55}(connected|connects|open to|opens to|open into|opens into|direct access|door to)[^.]{0,55}dining|dining[^.]{0,55}(connected|connects|open to|opens to|open into|opens into|direct access|door to)[^.]{0,55}kitchen/.test(text);
+}
+
 export function wantsAttachedBath(brief: Brief) {
   const text = `${brief.prompt} ${brief.adjacency.join(" ")}`.toLowerCase();
   if (/\b(no|not|without|avoid)\b[^.]{0,45}\b(attached bath|attached bathroom|ensuite|en-suite|en suite)\b|\b(do not|don't)\b[^.]{0,45}\b(attached bath|attached bathroom|ensuite|en-suite|en suite)\b/.test(text)) return false;
   return /\b(attached bath|attached bathroom|ensuite|en-suite|en suite)\b/.test(text) || /\bbath(room)?\b[^.]{0,40}\battached\b|\battached\b[^.]{0,40}\bbath(room)?\b/.test(text);
+}
+
+const FEATURE_ALIASES: Record<string, string[]> = {
+  garage: ["garage", "car parking", "parking bay"],
+  internal_staircase: ["internal staircase", "staircase", "stairs", "stair"],
+  utility: ["utility", "utility room"],
+  balcony: ["balcony"],
+  study: ["study", "office", "home office", "flex room", "flex space"],
+  pantry: ["pantry", "store room", "store"],
+  laundry: ["laundry", "laundry room"],
+  porch: ["porch", "veranda", "sit-out", "sitout", "front sit-out"],
+  open_space: ["open plan", "open-plan", "open dining", "open space", "open flexible space"],
+  prayer_room: ["prayer room", "pooja room", "puja room"],
+  roof_garden: ["roof garden", "terrace garden"],
+};
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function phrasePattern(phrase: string) {
+  return escapeRegExp(phrase).replace(/\s+/g, "[-\\s]+");
+}
+
+export function featureIsMentioned(text: string, feature: string) {
+  const labels = FEATURE_ALIASES[feature] ?? [feature.replaceAll("_", " ")];
+  return labels.some(label => new RegExp(`(^|\\W)${phrasePattern(label)}(\\W|$)`, "i").test(text));
+}
+
+export function featureIsNegated(text: string, feature: string) {
+  const labels = FEATURE_ALIASES[feature] ?? [feature.replaceAll("_", " ")];
+  return labels.some(label => {
+    const phrase = phrasePattern(label);
+    return new RegExp(`\\b(no|not|without|avoid|exclude|skip)\\b[^.?!;\\n]{0,55}\\b${phrase}\\b|\\b(do not|don't|dont|should not|must not|no need for)\\b[^.?!;\\n]{0,55}\\b${phrase}\\b|\\b${phrase}\\b[^.?!;\\n]{0,40}\\b(not required|not needed|not necessary)\\b`, "i").test(text);
+  });
+}
+
+export function removeNegatedFeatures(features: string[], prompt: string, adjacency: string[] = []) {
+  const text = `${prompt} ${adjacency.join(" ")}`;
+  return features.filter(feature => !featureIsNegated(text, feature));
+}
+
+export function requestedOptionalFeaturesFromText(text: string, features: string[]) {
+  return features.filter(feature => featureIsMentioned(text, feature) && !featureIsNegated(text, feature));
 }
 
 export function needsWetVentilation(room: Room) {

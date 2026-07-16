@@ -11,9 +11,10 @@ after(async () => {
   await vite.close();
 });
 
-const { createProject, finalPlanErrors, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
+const { createProject, finalPlanErrors, parseBrief, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
 const { evaluateArchitecture } = await vite.ssrLoadModule("/app/architecture-validator.ts");
 const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasibility.ts");
+const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
 const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
 
 function makeBrief(overrides) {
@@ -155,6 +156,7 @@ function assertQuality(brief, expectations = {}) {
   if (expectations.study) assert.ok(roomCount(plan, "study") >= 1, "study count");
   if (expectations.roundedLiving) assert.ok(plan.rooms.some(room => room.type === "living" && room.shape === "rounded"), "rounded living room");
   if (expectations.noAttachedBath) assert.equal(project.plans.flatMap(plan => plan.rooms).some(room => /attached/i.test(room.name)), false, "should not invent attached bath labels");
+  if (!brief.features.includes("study")) assert.equal(project.plans.flatMap(plan => plan.rooms).some(room => room.type === "study"), false, "should not invent study/flex rooms");
   expectations.placements?.forEach(check => assertRoomPlacement(plan, check.type, check.sides, check.maxDistance, check.label));
   expectations.maxRatios?.forEach(check => assertRoomRatio(plan, check.type, check.maxRatio, check.label));
   if (expectations.noWarnings) assert.deepEqual(architecture.warnings, [], "architecture warnings");
@@ -338,6 +340,73 @@ test("attached bathrooms require a direct bedroom door", () => {
   assert.ok(report.errors.some(message => /direct door to a bedroom/i.test(message)), report.errors.join("\n"));
 });
 
+test("connected kitchen and dining require a passable opening", () => {
+  const brief = makeBrief({
+    prompt: "Create a 32 ft x 40 ft house with kitchen connected to dining.",
+    plotWidth: 32,
+    plotDepth: 40,
+    bedrooms: 0,
+    bathrooms: 0,
+    livingRooms: 0,
+    kitchens: 1,
+    diningRooms: 1,
+    adjacency: ["kitchen connected to dining"],
+  });
+  const plan = {
+    id: "bad-kitchen-dining",
+    level: 0,
+    elevation: 0,
+    width: 32,
+    depth: 40,
+    unit: "feet",
+    facing: "south",
+    roadSide: "south",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 0, y: 28, width: 32, depth: 12, color: "#fff" },
+      { id: "kitchen", name: "Kitchen", type: "kitchen", x: 0, y: 0, width: 16, depth: 14, color: "#fff" },
+      { id: "dining", name: "Dining area", type: "dining", x: 16, y: 0, width: 16, depth: 14, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "south", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "kitchen-window", kind: "window", wall: "west", roomId: "kitchen", offset: 0.5, width: 4 },
+      { id: "dining-window", kind: "window", wall: "east", roomId: "dining", offset: 0.5, width: 4 },
+    ],
+  };
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /passable door or open connection/i.test(message)), report.errors.join("\n"));
+});
+
+test("road-facing plans require a visible main entry door", () => {
+  const brief = makeBrief({
+    prompt: "Create a 32 ft x 40 ft south-facing house with road and main entry on the south side.",
+    plotWidth: 32,
+    plotDepth: 40,
+    bedrooms: 0,
+    bathrooms: 0,
+    livingRooms: 0,
+    kitchens: 0,
+    diningRooms: 0,
+    facing: "south",
+    roadSide: "south",
+  });
+  const plan = {
+    id: "missing-main-entry",
+    level: 0,
+    elevation: 0,
+    width: 32,
+    depth: 40,
+    unit: "feet",
+    facing: "south",
+    roadSide: "south",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 0, y: 32, width: 32, depth: 8, color: "#fff" },
+    ],
+    openings: [],
+  };
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /main entry\/gate/i.test(message)), report.errors.join("\n"));
+});
+
 test("bathrooms are not labeled attached unless requested", () => {
   const project = createProject(makeBrief({
     prompt: "Create a 32 ft x 44 ft north-facing two floor home with 2 bedrooms, 2 bathrooms, living room, kitchen, utility and internal staircase. Road on north side. Do not create an ensuite.",
@@ -353,4 +422,147 @@ test("bathrooms are not labeled attached unless requested", () => {
   }));
   const attachedRooms = project.plans.flatMap(plan => plan.rooms).filter(room => /attached/i.test(room.name));
   assert.deepEqual(attachedRooms.map(room => room.name), []);
+});
+
+test("leftover areas are neutral storage unless study is requested", () => {
+  const project = createProject(makeBrief({
+    prompt: "Create a 36 ft x 54 ft west-facing 2 bedroom house with 2 bathrooms, living room, kitchen beside dining, utility, and internal staircase. Road on west side. Do not add a study or flex room.",
+    plotWidth: 36,
+    plotDepth: 54,
+    bedrooms: 2,
+    bathrooms: 2,
+    facing: "west",
+    roadSide: "west",
+    features: ["utility", "internal_staircase"],
+    adjacency: ["kitchen beside dining"],
+  }));
+  const inventedStudy = project.plans.flatMap(plan => plan.rooms).filter(room => room.type === "study" || /flex room/i.test(room.name));
+  assert.deepEqual(inventedStudy.map(room => room.name), []);
+});
+
+test("feature extraction respects negated optional rooms", () => {
+  const brief = parseBrief(
+    "Create a 36 ft x 54 ft west-facing single-floor house with 2 bedrooms, 2 bathrooms, living room, kitchen, dining, laundry and internal staircase. Road on west side. Do not add a study or flex room, without garage, and pantry not required.",
+    { floors: 1, plotWidth: 36, plotDepth: 54, unit: "feet", facing: "west", roadSide: "west" },
+  );
+
+  assert.ok(brief.features.includes("laundry"), "laundry should still be extracted");
+  assert.ok(brief.features.includes("internal_staircase"), "internal staircase should still be extracted");
+  assert.equal(brief.features.includes("study"), false, "negated study/flex room must not be extracted");
+  assert.equal(brief.features.includes("garage"), false, "negated garage must not be extracted");
+  assert.equal(brief.features.includes("pantry"), false, "pantry not required must not be extracted");
+});
+
+test("local parser understands single-floor and mixed full-half bathrooms", () => {
+  const brief = parseBrief(
+    "Create a 28 ft x 42 ft south-facing single-floor house with 3 bedrooms, 1 full bathroom, 1 half bathroom, living room, kitchen, laundry, and central hallway.",
+    { plotWidth: 28, plotDepth: 42, unit: "feet", facing: "south", roadSide: "south" },
+  );
+
+  assert.equal(brief.floors, 1);
+  assert.equal(brief.bedrooms, 3);
+  assert.equal(brief.bathrooms, 2);
+  assert.ok(brief.features.includes("laundry"), "laundry should still be extracted");
+});
+
+test("local parser extracts plot dimensions, unit, facing, and road side from prompt", () => {
+  const brief = parseBrief(
+    "Create a modern 40 ft x 60 ft east-facing house with 2 bedrooms, 2 bathrooms, kitchen, dining, living room, garage, staircase, and utility. The road is on the east side.",
+    {},
+  );
+
+  assert.equal(brief.plotWidth, 40);
+  assert.equal(brief.plotDepth, 60);
+  assert.equal(brief.unit, "feet");
+  assert.equal(brief.facing, "east");
+  assert.equal(brief.roadSide, "east");
+  assert.equal(brief.bedrooms, 2);
+  assert.equal(brief.bathrooms, 2);
+  assert.ok(brief.features.includes("garage"), "garage should be extracted");
+  assert.ok(brief.features.includes("internal_staircase"), "staircase should be extracted");
+  assert.ok(brief.features.includes("utility"), "utility should be extracted");
+});
+
+test("local parser respects no separate dining room", () => {
+  const brief = parseBrief(
+    "Create a 32 ft x 44 ft north-facing 2 bedroom house with 2 bathrooms, living room, kitchen, utility, porch, and internal staircase. Road and main entry on north side. No separate dining room.",
+    {},
+  );
+
+  assert.equal(brief.plotWidth, 32);
+  assert.equal(brief.plotDepth, 44);
+  assert.equal(brief.facing, "north");
+  assert.equal(brief.roadSide, "north");
+  assert.equal(brief.livingRooms, 1);
+  assert.equal(brief.kitchens, 1);
+  assert.equal(brief.diningRooms, 0);
+});
+
+test("API normalizer overrides negated shared-room counts", () => {
+  const prompt = "Create a 32 ft x 44 ft north-facing 2 bedroom house with 2 bathrooms, living room, kitchen, utility, porch, and internal staircase. Road and main entry on north side. No separate dining room.";
+  const brief = normalizeParsedRequirements({
+    title: "No Dining Test",
+    plotWidth: 32,
+    plotDepth: 44,
+    unit: "feet",
+    floors: 1,
+    bedrooms: 2,
+    bathrooms: 2,
+    livingRooms: 1,
+    kitchens: 1,
+    diningRooms: 1,
+    facing: "north",
+    roadSide: "north",
+    features: ["utility", "internal_staircase", "porch"],
+    adjacency: [],
+    warnings: [],
+  }, prompt);
+
+  assert.equal(brief.livingRooms, 1);
+  assert.equal(brief.kitchens, 1);
+  assert.equal(brief.diningRooms, 0);
+});
+
+test("API normalizer falls back to prompt for missing Gemini fields", () => {
+  const prompt = "Create a 28 ft x 42 ft south-facing single-floor house with 3 bedrooms, 1 full bathroom, 1 half bathroom, living room, kitchen, laundry, and central hallway. Road and main entry on the south side.";
+  const brief = normalizeParsedRequirements({
+    title: "Partial Gemini Parse",
+    unit: "",
+    facing: "unspecified",
+    roadSide: "unspecified",
+    features: ["laundry"],
+  }, prompt);
+
+  assert.equal(brief.plotWidth, 28);
+  assert.equal(brief.plotDepth, 42);
+  assert.equal(brief.unit, "feet");
+  assert.equal(brief.floors, 1);
+  assert.equal(brief.bedrooms, 3);
+  assert.equal(brief.bathrooms, 2);
+  assert.equal(brief.facing, "south");
+  assert.equal(brief.roadSide, "south");
+});
+
+test("API normalizer recovers omitted prompt features without adding negated ones", () => {
+  const prompt = "Create a modern 40 ft x 60 ft east-facing house with 2 bedrooms, 2 bathrooms, kitchen, dining, living room, garage, staircase, and utility. The road is on the east side. Do not add a study.";
+  const brief = normalizeParsedRequirements({
+    title: "Partial Feature Parse",
+    plotWidth: 40,
+    plotDepth: 60,
+    unit: "feet",
+    floors: 1,
+    bedrooms: 2,
+    bathrooms: 2,
+    livingRooms: 1,
+    kitchens: 1,
+    diningRooms: 1,
+    facing: "east",
+    roadSide: "east",
+    features: [],
+  }, prompt);
+
+  assert.ok(brief.features.includes("garage"), "garage should be recovered from prompt");
+  assert.ok(brief.features.includes("internal_staircase"), "staircase should be recovered from prompt");
+  assert.ok(brief.features.includes("utility"), "utility should be recovered from prompt");
+  assert.equal(brief.features.includes("study"), false, "negated study must not be recovered");
 });
