@@ -17,7 +17,7 @@ const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasi
 const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
 const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
 const { buildPlan3DGeometry } = await vite.ssrLoadModule("/app/plan-3d-geometry.ts");
-const { getEntryPath, getMainEntryPlacement, getOpeningPlacement } = await vite.ssrLoadModule("/app/plan-openings.ts");
+const { getDoorLeafPlacement, getEntryPath, getMainEntryPlacement, getOpeningPlacement } = await vite.ssrLoadModule("/app/plan-openings.ts");
 
 function makeBrief(overrides) {
   return {
@@ -597,6 +597,33 @@ test("3D geometry merges shared walls and cuts door gaps", () => {
   assert.equal(geometry.walls.filter(wall => wall.kind === "exterior").length, 4);
 });
 
+test("3D geometry cuts partial window openings instead of solid walls", () => {
+  const plan = {
+    id: "window-cutout-plan",
+    level: 0,
+    elevation: 0,
+    width: 12,
+    depth: 10,
+    unit: "feet",
+    facing: "south",
+    roadSide: "south",
+    rooms: [
+      { id: "living", name: "Living", type: "living", x: 0, y: 0, width: 12, depth: 10, color: "#fff" },
+    ],
+    openings: [
+      { id: "living-window", kind: "window", wall: "south", roomId: "living", offset: 0.5, width: 4 },
+    ],
+  };
+
+  const geometry = buildPlan3DGeometry(plan);
+  const windowPieces = geometry.walls.filter(wall => wall.orientation === "horizontal" && Math.abs(wall.z1 - 10) < 0.03 && Math.abs(wall.x1 - 4) < 0.03 && Math.abs(wall.x2 - 8) < 0.03);
+
+  assert.equal(windowPieces.length, 2);
+  assert.ok(windowPieces.some(wall => wall.bottom === 0 && Math.abs(wall.height - 3.2) < 0.03), "window should keep wall below sill");
+  assert.ok(windowPieces.some(wall => Math.abs(wall.bottom - 5.55) < 0.03 && Math.abs(wall.height - 3.45) < 0.03), "window should keep wall above lintel");
+  assert.equal(windowPieces.some(wall => wall.bottom === 0 && Math.abs(wall.height - 9) < 0.03), false, "window span should not remain full-height wall");
+});
+
 test("opening placement is shared between blueprint and 3D geometry", () => {
   const room = { id: "foyer", name: "Foyer", type: "foyer", x: 4, y: 8, width: 12, depth: 10, color: "#fff" };
   const eastDoor = { id: "front-door", kind: "door", wall: "east", roomId: "foyer", offset: 0.25, width: 3 };
@@ -621,6 +648,13 @@ test("opening placement is shared between blueprint and 3D geometry", () => {
     end: 12.5,
     center: 10,
   });
+
+  const eastLeaf = getDoorLeafPlacement(getOpeningPlacement(eastDoor, room));
+  assert.equal(eastLeaf.orientation, "vertical");
+  assert.equal(eastLeaf.hingeX, 16);
+  assert.equal(eastLeaf.hingeZ, 9.75);
+  assert.ok(eastLeaf.rotationY < 0, "east-side door should swing inward toward the room");
+  assert.equal(eastLeaf.length, 3);
 });
 
 test("entry path targets the human main entry instead of the garage door", () => {

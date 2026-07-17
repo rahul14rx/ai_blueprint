@@ -4,7 +4,7 @@ import { Environment, FirstPersonControls, Grid, OrbitControls, Text } from "@re
 import { Suspense } from "react";
 import { FloorPlan, MaterialSet, Room } from "./studio-types";
 import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
-import { getEntryPath, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
+import { getDoorLeafPlacement, getEntryPath, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
 
 function Wall({ position, size, color, id, selected, onSelect }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void }) {
   return <mesh position={position} castShadow receiveShadow onClick={e => { e.stopPropagation(); onSelect(id); }}>
@@ -23,8 +23,8 @@ function GrassGround({ width, depth }: { width: number; depth: number }) {
 function SharedWall({ wall, y, selectedId, onSelect }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void }) {
   const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
   const position: [number, number, number] = wall.orientation === "horizontal"
-    ? [(wall.x1 + wall.x2) / 2, y + wall.height / 2, wall.z1]
-    : [wall.x1, y + wall.height / 2, (wall.z1 + wall.z2) / 2];
+    ? [(wall.x1 + wall.x2) / 2, y + wall.bottom + wall.height / 2, wall.z1]
+    : [wall.x1, y + wall.bottom + wall.height / 2, (wall.z1 + wall.z2) / 2];
   const size: [number, number, number] = wall.orientation === "horizontal"
     ? [length, wall.height, wall.thickness]
     : [wall.thickness, wall.height, length];
@@ -45,10 +45,32 @@ function OpeningMarker({ placement, y, selectedId, onSelect }: { placement: Open
       ? [placement.center, y + 0.08, placement.coord]
       : [placement.coord, y + 0.08, placement.center];
     const size: [number, number, number] = horizontal ? [length, 0.16, 0.34] : [0.34, 0.16, length];
-    return <mesh position={position} receiveShadow onClick={event => { event.stopPropagation(); onSelect(id); }}>
-      <boxGeometry args={size} />
-      <meshStandardMaterial color={isSelected ? "#EF7545" : "#C8643C"} roughness={0.62} />
-    </mesh>;
+    const isPassage = opening.id.startsWith("passage-");
+    const isGarage = placement.room.type === "garage";
+    const leaf = getDoorLeafPlacement(placement);
+    const doorHeight = isGarage ? 7.2 : 6.9;
+    const doorColor = isSelected ? "#EF7545" : isGarage ? "#626C68" : "#855D3B";
+
+    return <group onClick={event => { event.stopPropagation(); onSelect(id); }}>
+      <mesh position={position} receiveShadow>
+        <boxGeometry args={size} />
+        <meshStandardMaterial color={isSelected ? "#EF7545" : isPassage ? "#D7B08B" : "#C8643C"} roughness={0.62} />
+      </mesh>
+      {isGarage && <mesh position={horizontal ? [placement.center, y + doorHeight / 2, placement.coord] : [placement.coord, y + doorHeight / 2, placement.center]} castShadow receiveShadow>
+        <boxGeometry args={horizontal ? [length, doorHeight, 0.18] : [0.18, doorHeight, length]} />
+        <meshStandardMaterial color={doorColor} roughness={0.72} />
+      </mesh>}
+      {!isGarage && !isPassage && <group position={[leaf.hingeX, y + doorHeight / 2, leaf.hingeZ]} rotation={[0, leaf.rotationY, 0]}>
+        <mesh position={leaf.orientation === "horizontal" ? [leaf.length / 2, 0, 0] : [0, 0, leaf.length / 2]} castShadow receiveShadow>
+          <boxGeometry args={leaf.orientation === "horizontal" ? [leaf.length, doorHeight, 0.16] : [0.16, doorHeight, leaf.length]} />
+          <meshStandardMaterial color={doorColor} roughness={0.58} />
+        </mesh>
+        <mesh position={leaf.orientation === "horizontal" ? [leaf.length * 0.82, 0.2, 0.12] : [0.12, 0.2, leaf.length * 0.82]} castShadow>
+          <boxGeometry args={[0.16, 0.16, 0.16]} />
+          <meshStandardMaterial color="#2F312D" roughness={0.35} />
+        </mesh>
+      </group>}
+    </group>;
   }
 
   const height = opening.kind === "window" ? 2.35 : 1.1;

@@ -21,6 +21,14 @@ export type EntryPath = {
   entry: OpeningPlacement;
 };
 
+export type DoorLeafPlacement = {
+  hingeX: number;
+  hingeZ: number;
+  rotationY: number;
+  length: number;
+  orientation: OpeningPlacement["orientation"];
+};
+
 const ENTRY_ROOM_PRIORITY: Record<string, number> = {
   foyer: 0,
   porch: 1,
@@ -38,6 +46,19 @@ export function getOpeningPlacement(opening: Opening, room: Room): OpeningPlacem
   const coord = opening.wall === "north" ? room.y : opening.wall === "south" ? room.y + room.depth : opening.wall === "west" ? room.x : room.x + room.width;
 
   return { opening, room, orientation, coord, start, end, center: (start + end) / 2 };
+}
+
+export function getDoorLeafPlacement(placement: OpeningPlacement): DoorLeafPlacement {
+  const maxLeaf = placement.room.type === "garage" ? placement.end - placement.start : Math.min(placement.end - placement.start, 3.2);
+  const swing = Math.PI / 2.7;
+  const rotationY = placement.opening.wall === "north" ? -swing : placement.opening.wall === "south" ? swing : placement.opening.wall === "east" ? -swing : swing;
+  return {
+    hingeX: placement.orientation === "horizontal" ? placement.start : placement.coord,
+    hingeZ: placement.orientation === "horizontal" ? placement.coord : placement.start,
+    rotationY,
+    length: maxLeaf,
+    orientation: placement.orientation,
+  };
 }
 
 export function getPlanOpeningPlacements(plan: FloorPlan, kinds?: Opening["kind"][]) {
