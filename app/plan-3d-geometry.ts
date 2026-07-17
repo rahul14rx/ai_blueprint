@@ -1,4 +1,5 @@
-import { FloorPlan, Opening, Room, WallSide } from "./studio-types";
+import { FloorPlan, Room, WallSide } from "./studio-types";
+import { getPlanOpeningPlacements } from "./plan-openings";
 
 export type WallSegment3D = {
   id: string;
@@ -50,21 +51,6 @@ function roomEdges(room: Room): Edge[] {
   ];
 }
 
-function openingGap(opening: Opening, room: Room): OpeningGap {
-  const horizontal = opening.wall === "north" || opening.wall === "south";
-  const roomStart = horizontal ? room.x : room.y;
-  const roomLength = horizontal ? room.width : room.depth;
-  const start = roomStart + (roomLength - opening.width) * opening.offset;
-  const end = start + opening.width;
-
-  return {
-    orientation: horizontal ? "horizontal" : "vertical",
-    coord: opening.wall === "north" ? room.y : opening.wall === "south" ? room.y + room.depth : opening.wall === "west" ? room.x : room.x + room.width,
-    start,
-    end,
-  };
-}
-
 function covers(edge: Edge, start: number, end: number) {
   const mid = (start + end) / 2;
   return edge.start - EPSILON <= mid && edge.end + EPSILON >= mid;
@@ -109,14 +95,12 @@ function mergeSegments(segments: WallSegment3D[]) {
 
 export function buildPlan3DGeometry(plan: FloorPlan): { walls: WallSegment3D[] } {
   const edges = plan.rooms.flatMap(roomEdges);
-  const roomById = new Map(plan.rooms.map(room => [room.id, room]));
-  const doorGaps = plan.openings
-    .filter(opening => opening.kind === "door")
-    .map(opening => {
-      const room = roomById.get(opening.roomId);
-      return room ? openingGap(opening, room) : null;
-    })
-    .filter((gap): gap is OpeningGap => Boolean(gap));
+  const doorGaps: OpeningGap[] = getPlanOpeningPlacements(plan, ["door"]).map(placement => ({
+    orientation: placement.orientation,
+    coord: placement.coord,
+    start: placement.start,
+    end: placement.end,
+  }));
 
   const groups = new Map<string, Edge[]>();
   for (const edge of edges) {

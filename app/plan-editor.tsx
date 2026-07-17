@@ -3,8 +3,9 @@ import { Arc, Circle, Layer, Line, Path, Rect, Stage, Text, Transformer } from "
 import { useEffect, useRef } from "react";
 import Konva from "konva";
 import { FloorPlan, Opening, Room } from "./studio-types";
+import { getEntryPath, getMainEntryPlacement, getOpeningPlacement } from "./plan-openings";
 
-const OFFSET = 34;
+const OFFSET = 62;
 const WALL = "#111713";
 const INTERNAL_WALL = "#24302A";
 const PAPER = "#FFFFFF";
@@ -122,10 +123,11 @@ function RoomShape({ room, scale, unitMark, selected, onSelect, onChange }: { ro
 function OpeningShape({ opening, room, scale }: { opening: Opening; room: Room; scale: number }) {
   const doorStroke = "#B85832";
   const ventStroke = "#517466";
-  const w = Math.min(opening.width * scale * 0.72, 22);
-  const horizontal = opening.wall === "north" || opening.wall === "south";
-  const x = OFFSET + (room.x + (horizontal ? (room.width - opening.width) * opening.offset : opening.wall === "east" ? room.width : 0)) * scale;
-  const y = OFFSET + (room.y + (!horizontal ? (room.depth - opening.width) * opening.offset : opening.wall === "south" ? room.depth : 0)) * scale;
+  const placement = getOpeningPlacement(opening, room);
+  const horizontal = placement.orientation === "horizontal";
+  const w = opening.width * scale;
+  const x = OFFSET + (horizontal ? placement.start : placement.coord) * scale;
+  const y = OFFSET + (horizontal ? placement.coord : placement.start) * scale;
   const gap = horizontal ? [x, y, x + w, y] : [x, y, x, y + w];
 
   if (opening.kind === "window") return <>
@@ -150,22 +152,28 @@ function OpeningShape({ opening, room, scale }: { opening: Opening; room: Room; 
   </>;
 }
 
+function EntryPathShape({ plan, scale }: { plan: FloorPlan; scale: number }) {
+  const path = getEntryPath(plan);
+  if (!path) return null;
+
+  const x = OFFSET + Math.min(path.x1, path.x2) * scale;
+  const y = OFFSET + Math.min(path.z1, path.z2) * scale;
+  const width = Math.abs(path.x2 - path.x1) * scale;
+  const height = Math.abs(path.z2 - path.z1) * scale;
+
+  return <>
+    <Rect x={x} y={y} width={width} height={height} fill="#E8E0CF" stroke="#53695B" strokeWidth={1} dash={[5, 4]} listening={false}/>
+    <Text x={x - 8} y={y + height / 2 - 5} width={width + 16} text="ENTRY PATH" align="center" fontFamily="Arial" fontStyle="bold" fontSize={8} fill="#53695B" listening={false}/>
+  </>;
+}
+
 function EntryMarker({ plan, scale }: { plan: FloorPlan; scale: number }) {
-  const roadSide = plan.roadSide !== "unspecified" ? plan.roadSide : plan.facing;
-  const mainDoor = plan.openings.find(opening => opening.kind === "door" && opening.wall === roadSide && (
-    plan.rooms.find(room => room.id === opening.roomId)?.type === "foyer" ||
-    plan.rooms.find(room => room.id === opening.roomId)?.type === "hallway" ||
-    plan.rooms.find(room => room.id === opening.roomId)?.type === "porch" ||
-    plan.rooms.find(room => room.id === opening.roomId)?.type === "open"
-  ));
-  if (!mainDoor) return null;
-
-  const room = plan.rooms.find(room => room.id === mainDoor.roomId);
-  if (!room) return null;
-
-  const horizontal = mainDoor.wall === "north" || mainDoor.wall === "south";
-  const x = OFFSET + (room.x + (horizontal ? (room.width - mainDoor.width) * mainDoor.offset : mainDoor.wall === "east" ? room.width : 0)) * scale;
-  const y = OFFSET + (room.y + (!horizontal ? (room.depth - mainDoor.width) * mainDoor.offset : mainDoor.wall === "south" ? room.depth : 0)) * scale;
+  const placement = getMainEntryPlacement(plan);
+  if (!placement) return null;
+  const mainDoor = placement.opening;
+  const horizontal = placement.orientation === "horizontal";
+  const x = OFFSET + (horizontal ? placement.start : placement.coord) * scale;
+  const y = OFFSET + (horizontal ? placement.coord : placement.start) * scale;
   const labelX = mainDoor.wall === "east" ? x + 10 : mainDoor.wall === "west" ? x - 58 : x - 24;
   const labelY = mainDoor.wall === "south" ? y + 10 : mainDoor.wall === "north" ? y - 24 : y - 8;
   const arrowPoints = mainDoor.wall === "south" ? [x, y + 14, x, y + 2] : mainDoor.wall === "north" ? [x, y - 14, x, y - 2] : mainDoor.wall === "east" ? [x + 14, y, x + 2, y] : [x - 14, y, x - 2, y];
@@ -184,6 +192,7 @@ export default function PlanEditor({ plan, selectedId, onSelect, onUpdate }: { p
     <Stage width={plan.width * scale + OFFSET * 2 + 80} height={plan.depth * scale + OFFSET * 2}>
       <Layer>
         <Rect x={OFFSET - 18} y={OFFSET - 18} width={plan.width * scale + 36} height={plan.depth * scale + 36} fill={PAPER}/>
+        <EntryPathShape plan={plan} scale={scale}/>
         <Rect x={OFFSET} y={OFFSET} width={plan.width * scale} height={plan.depth * scale} fill={PAPER} stroke={WALL} strokeWidth={4.2} />
         {plan.rooms.map(room => <RoomShape key={room.id} room={room} scale={scale} unitMark={unitMark} selected={room.id === selectedId} onSelect={() => onSelect(room.id)} onChange={onUpdate} />)}
         {plan.openings.map(opening => {

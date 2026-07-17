@@ -17,6 +17,7 @@ const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasi
 const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
 const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
 const { buildPlan3DGeometry } = await vite.ssrLoadModule("/app/plan-3d-geometry.ts");
+const { getEntryPath, getMainEntryPlacement, getOpeningPlacement } = await vite.ssrLoadModule("/app/plan-openings.ts");
 
 function makeBrief(overrides) {
   return {
@@ -594,4 +595,76 @@ test("3D geometry merges shared walls and cuts door gaps", () => {
   assert.equal(totalSharedLength, 6);
   assert.ok(sharedWallPieces.every(wall => wall.thickness < 0.3), "shared partitions should use interior wall thickness");
   assert.equal(geometry.walls.filter(wall => wall.kind === "exterior").length, 4);
+});
+
+test("opening placement is shared between blueprint and 3D geometry", () => {
+  const room = { id: "foyer", name: "Foyer", type: "foyer", x: 4, y: 8, width: 12, depth: 10, color: "#fff" };
+  const eastDoor = { id: "front-door", kind: "door", wall: "east", roomId: "foyer", offset: 0.25, width: 3 };
+  const southWindow = { id: "front-window", kind: "window", wall: "south", roomId: "foyer", offset: 0.5, width: 5 };
+
+  assert.deepEqual(getOpeningPlacement(eastDoor, room), {
+    opening: eastDoor,
+    room,
+    orientation: "vertical",
+    coord: 16,
+    start: 9.75,
+    end: 12.75,
+    center: 11.25,
+  });
+
+  assert.deepEqual(getOpeningPlacement(southWindow, room), {
+    opening: southWindow,
+    room,
+    orientation: "horizontal",
+    coord: 18,
+    start: 7.5,
+    end: 12.5,
+    center: 10,
+  });
+});
+
+test("entry path targets the human main entry instead of the garage door", () => {
+  const plan = {
+    id: "entry-path-plan",
+    level: 0,
+    elevation: 0,
+    width: 40,
+    depth: 60,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 24, y: 8, width: 16, depth: 12, color: "#fff" },
+      { id: "garage", name: "Garage", type: "garage", x: 24, y: 36, width: 16, depth: 18, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "garage-door", kind: "door", wall: "east", roomId: "garage", offset: 0.5, width: 8 },
+    ],
+  };
+
+  const entry = getMainEntryPlacement(plan);
+  const path = getEntryPath(plan);
+
+  assert.equal(entry?.opening.id, "entry");
+  assert.equal(path?.entry.opening.id, "entry");
+  assert.equal(path?.side, "east");
+  assert.equal(path?.x1, 40);
+  assert.ok(path?.x2 > 40, "entry path should extend outside the road-facing edge");
+});
+
+test("generated main entry continues into the circulation network", () => {
+  const project = createProject(makeBrief({
+    prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, a living room, kitchen beside the dining room, a one-car garage, an internal staircase and a utility room. One bathroom should be attached. The road is on the east side.",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: ["kitchen beside dining room", "one bathroom attached"],
+  }));
+  const plan = project.plans[0];
+  const entry = getMainEntryPlacement(plan);
+  assert.ok(entry, "main entry should be detected");
+
+  if (entry.room.type !== "hallway") {
+    const targets = doorTargets(plan, entry.room);
+    assert.ok(targets.some(target => target.type === "hallway" || target.type === "foyer" || target.name.toLowerCase().includes("lobby") || target.name.toLowerCase().includes("passage")), `${entry.room.name} should continue into circulation`);
+  }
 });

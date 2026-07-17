@@ -398,6 +398,18 @@ function generateOpenings(plan: FloorPlan, brief: Brief): Opening[] {
       openings.push({ id: `vent-${r.id}`, kind: "vent", wall: ventWall, roomId: r.id, offset: 0.5, width: Math.min(feet(brief, 2), ventWall === "north" || ventWall === "south" ? r.width * 0.45 : r.depth * 0.45) });
     }
   });
+
+  plan.rooms.forEach((room, index) => {
+    if (!isAccessRoom(room)) return;
+    plan.rooms.slice(index + 1).forEach(target => {
+      if (!isAccessRoom(target)) return;
+      const wall = sharedWall(room, target);
+      if (!wall) return;
+      const width = Math.min(feet(brief, 4), wall === "north" || wall === "south" ? room.width * 0.55 : room.depth * 0.55);
+      openings.push({ id: `passage-${room.id}-${target.id}`, kind: "door", wall, roomId: room.id, offset: doorOffset(room, target, wall, width), width });
+    });
+  });
+
   return openings;
 }
 
