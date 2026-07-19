@@ -264,13 +264,24 @@ function makeNorthSouthCentralSpineCandidate(brief: Brief, level: number, progra
   const bathStripW = canUseBathStrip ? clamp(rightW * 0.32, toUnit(brief, 5.5), toUnit(brief, 7)) : 0;
   const rightBedroomW = bathStripW ? rightW - bathStripW : rightW;
   const rightBedroomRows = new Set<number>();
+  const rightBedroomNameByRow = new Map<number, string>();
+  const attachBedroomToBath = wantsAttachedBath(brief) && bathStripW > 0 && bedroomCount > 0;
   for (let i = 0; i < bedroomCount; i++) {
-    const row = i % rows;
-    const col = Math.floor(i / rows);
+    if (attachBedroomToBath && i === 0) {
+      rooms.push(makeRoom(level, "bedroom-1", "Bedroom 1", "bedroom", rightX + bathStripW, middleTop, rightBedroomW, rowH));
+      rightBedroomRows.add(0);
+      rightBedroomNameByRow.set(0, "Bedroom 1");
+      continue;
+    }
+    const placementIndex = attachBedroomToBath ? i - 1 : i;
+    const leftSideSlot = placementIndex < rows;
+    const row = leftSideSlot || !bathStripW ? placementIndex % rows : placementIndex - rows + (attachBedroomToBath ? 1 : 0);
+    if (row >= rows) return null;
     const y = middleTop + row * rowH;
-    if (col === 0 || !bathStripW) rooms.push(makeRoom(level, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", 0, y, leftW, rowH));
+    if (leftSideSlot || !bathStripW) rooms.push(makeRoom(level, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", 0, y, leftW, rowH));
     else {
       rightBedroomRows.add(row);
+      rightBedroomNameByRow.set(row, `Bedroom ${i + 1}`);
       rooms.push(makeRoom(level, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", rightX + bathStripW, y, rightBedroomW, rowH));
     }
   }
@@ -289,9 +300,15 @@ function makeNorthSouthCentralSpineCandidate(brief: Brief, level: number, progra
           const leftover = leftoverSupportRoom(level, `bath-leftover-${i + 1}`, rightX, rowY + bathH, bathStripW, rowH - bathH, brief);
           if (leftover) rooms.push(leftover);
         }
-        if (hasBedroomEntry) rooms.push(makeRoom(level, `bedroom-${i + rows + 1}-entry`, `Bedroom ${i + rows + 1} entry`, "hallway", rightX, rowY + bathH, bathStripW, entryH));
+        if (hasBedroomEntry) rooms.push(makeRoom(level, `bedroom-${i + 1}-entry`, `${rightBedroomNameByRow.get(i) ?? `Bedroom ${i + rows + 1}`} entry`, "hallway", rightX, rowY + bathH, bathStripW, entryH));
         if (!hasBedroomEntry && rightBedroomW >= toUnit(brief, 3)) rooms.push(makeRoom(level, `linen-${i + 1}`, `Linen ${i + 1}`, "storage", rightX + bathStripW, rowY, rightBedroomW, rowH));
       }
+      rightBedroomRows.forEach(row => {
+        if (row < bathCount) return;
+        const rowY = middleTop + row * rowH;
+        const entryH = clamp(rowH * 0.28, toUnit(brief, 3.5), toUnit(brief, 5.5));
+        rooms.push(makeRoom(level, `right-bedroom-${row + 1}-entry`, `${rightBedroomNameByRow.get(row) ?? "Bedroom"} entry`, "hallway", rightX, rowY + rowH - entryH, bathStripW, entryH));
+      });
     } else {
       const rowH = middleH / bathCount;
       const bathW = clamp(rightW * 0.46, toUnit(brief, 5.5), Math.min(toUnit(brief, 7), rightW));
@@ -358,16 +375,18 @@ function makeEastWestCandidates(brief: Brief, level: number, program: LayoutProg
   const hallW = clamp(W * 0.1, toUnit(brief, 4), toUnit(brief, 5));
   const privateW = clamp(W * 0.5, toUnit(brief, 16), W - hallW - toUnit(brief, hasGarage ? 12 : 10));
   const roadW = W - privateW - hallW;
-  const topH = clamp(D * 0.25, toUnit(brief, 13), toUnit(brief, 17));
-  const foyerH = clamp(D * 0.12, toUnit(brief, 6.5), toUnit(brief, 8));
-  const garageH = hasGarage ? clamp(D * 0.28, toUnit(brief, 16), toUnit(brief, 20)) : 0;
-  const supportH = hasSupport ? clamp(D * 0.12, toUnit(brief, 6), toUnit(brief, 8)) : 0;
+  const needsFourCleanRows = bedroomCount >= 4 && D >= toUnit(brief, 58);
+  const topH = clamp(D * (needsFourCleanRows ? 0.21 : 0.25), toUnit(brief, needsFourCleanRows ? 12 : 13), toUnit(brief, needsFourCleanRows ? 15 : 17));
+  const foyerH = clamp(D * (needsFourCleanRows ? 0.1 : 0.12), toUnit(brief, needsFourCleanRows ? 6 : 6.5), toUnit(brief, needsFourCleanRows ? 7 : 8));
+  const garageH = hasGarage ? clamp(D * (needsFourCleanRows ? 0.27 : 0.28), toUnit(brief, needsFourCleanRows ? 18 : 16), toUnit(brief, 20)) : 0;
+  const supportH = hasSupport ? clamp(D * (needsFourCleanRows ? 0.09 : 0.12), toUnit(brief, 6), toUnit(brief, needsFourCleanRows ? 7 : 8)) : 0;
   const privateTop = topH + foyerH;
   const privateBottom = D - supportH;
   const privateH = privateBottom - privateTop;
   const bathW = bathCount ? clamp(privateW * 0.32, toUnit(brief, 5.5), toUnit(brief, 7)) : 0;
   const bedW = privateW - bathW;
-  const bedRows = Math.max(1, Math.min(bedroomCount, Math.floor(privateH / toUnit(brief, 10))));
+  const rowsByMinimum = Math.max(1, Math.floor(privateH / toUnit(brief, 10)));
+  const bedRows = Math.max(1, Math.min(bedroomCount, needsFourCleanRows && rowsByMinimum >= bedroomCount ? bedroomCount : rowsByMinimum));
   const bedH = privateH / bedRows;
   const rooms: Room[] = [];
 
@@ -385,13 +404,27 @@ function makeEastWestCandidates(brief: Brief, level: number, program: LayoutProg
   if (hasStairs) rooms.push(makeRoom(level, "stairs-1", "Internal stairs", "stairs", privateW + hallW, topH + foyerH, roadW, clamp(D * 0.18, toUnit(brief, 10), toUnit(brief, 13))));
   if (hasGarage) rooms.push(makeRoom(level, "garage-1", "Garage", "garage", privateW + hallW, D - garageH, roadW, garageH));
   const lobbyTop = topH + foyerH + (hasStairs ? clamp(D * 0.18, toUnit(brief, 10), toUnit(brief, 13)) : 0);
-  if (hasGarage && D - garageH - lobbyTop >= toUnit(brief, 5)) rooms.push(makeRoom(level, "garage-lobby", "Garage lobby", "storage", privateW + hallW, lobbyTop, roadW, D - garageH - lobbyTop));
+  if (hasGarage && D - garageH - lobbyTop >= toUnit(brief, 5)) {
+    const lobbyH = D - garageH - lobbyTop;
+    if (brief.livingRooms > 1 && hasReq(program, "study") && lobbyH >= toUnit(brief, 21)) {
+      const loungeH = clamp(lobbyH * 0.58, toUnit(brief, 12), lobbyH - toUnit(brief, 8));
+      rooms.push(makeRoom(level, "living-2", "Family lounge", "living", privateW + hallW, lobbyTop, roadW, loungeH));
+      rooms.push(makeRoom(level, "study-1", "Study", "study", privateW + hallW, lobbyTop + loungeH, roadW, lobbyH - loungeH));
+    } else if (brief.livingRooms > 1 && lobbyH >= toUnit(brief, 10)) {
+      rooms.push(makeRoom(level, "living-2", "Family lounge", "living", privateW + hallW, lobbyTop, roadW, lobbyH));
+    } else if (hasReq(program, "study") && lobbyH >= toUnit(brief, 8)) {
+      rooms.push(makeRoom(level, "study-1", "Study", "study", privateW + hallW, lobbyTop, roadW, lobbyH));
+    } else {
+      rooms.push(makeRoom(level, "garage-lobby", "Garage lobby", "storage", privateW + hallW, lobbyTop, roadW, lobbyH));
+    }
+  }
 
   for (let i = 0; i < bedroomCount; i++) {
     const row = i % bedRows;
     const col = Math.floor(i / bedRows);
-    const x = col === 0 ? 0 : privateW * 0.5;
-    const w = col === 0 ? bedW : Math.max(toUnit(brief, 10), privateW * 0.5);
+    const x = col === 0 ? 0 : bedW + bathW;
+    const w = col === 0 ? bedW : Math.max(toUnit(brief, 10), privateW - bedW - bathW);
+    if (col > 0 && w < toUnit(brief, 10)) return candidates;
     rooms.push(makeRoom(level, `bedroom-${i + 1}`, `Bedroom ${i + 1}`, "bedroom", x, privateTop + row * bedH, Math.min(w, bedW), bedH));
   }
   for (let i = 0; i < bathCount; i++) {
@@ -400,6 +433,12 @@ function makeEastWestCandidates(brief: Brief, level: number, program: LayoutProg
     const entryH = Math.min(toUnit(brief, 4.5), Math.max(toUnit(brief, 3.5), bedH - bathH));
     rooms.push(makeRoom(level, `bathroom-${i + 1}`, i === 0 && wantsAttachedBath(brief) ? "Attached bath" : `Bathroom ${i + 1}`, "bathroom", bedW, rowY, bathW, bathH));
     if (entryH >= toUnit(brief, 3.5)) rooms.push(makeRoom(level, `bedroom-${i + 1}-entry`, `Bedroom ${i + 1} entry`, "hallway", bedW, rowY + bedH - entryH, bathW, entryH));
+  }
+  for (let row = bathCount; row < Math.min(bedRows, bedroomCount); row++) {
+    if (!bathW) continue;
+    const rowY = privateTop + row * bedH;
+    const entryH = clamp(bedH * 0.32, toUnit(brief, 3.5), toUnit(brief, 4.8));
+    rooms.push(makeRoom(level, `bedroom-${row + 1}-entry`, `Bedroom ${row + 1} entry`, "hallway", bedW, rowY + bedH - entryH, bathW, entryH));
   }
   if (hasSupport) rooms.push(makeRoom(level, "utility-1", hasReq(program, "laundry") ? "Laundry / utility" : "Utility", hasReq(program, "laundry") ? "laundry" : "utility", 0, D - supportH, privateW, supportH));
 

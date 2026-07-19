@@ -28,19 +28,22 @@ function toFriendlyError(message: string) {
   if (lower.includes("api key") || lower.includes("permission") || lower.includes("unauthenticated") || lower.includes("403") || lower.includes("401")) {
     return "The Gemini API key was rejected. Check .env.local and restart the app.";
   }
-  if (lower.includes("not found") || lower.includes("404") || lower.includes("model")) return "The Gemini model name is invalid. Use GEMINI_MODEL=gemini-2.5-flash in .env.local and restart the app.";
+  if (lower.includes("not found") || lower.includes("404") || lower.includes("model name") || lower.includes("models/")) return "The Gemini model name is invalid. Use GEMINI_MODEL=gemini-2.5-flash in .env.local and restart the app.";
+  if (lower.includes("internal error") || lower.includes("internal") || lower.includes("reference =")) return "Gemini had a temporary internal error. Using the local parser fallback.";
   if (lower.includes("quota") || lower.includes("rate") || lower.includes("limit") || lower.includes("429")) {
-    return "The Gemini free limit was reached. Wait a bit, switch model, or use another key.";
+    return "Gemini free limit was reached. Using the local parser fallback so testing can continue.";
   }
   return "Could not understand the prompt. Please retry.";
 }
 
 export async function POST(request: Request) {
+  let promptText = "";
   try {
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey.includes("paste_your")) return Response.json({ error: "GEMINI_API_KEY is not configured in .env.local." }, { status: 503 });
     const { prompt } = await request.json();
     if (typeof prompt !== "string" || prompt.trim().length < 20) return Response.json({ error: "Please describe the plot and required rooms in more detail." }, { status: 400 });
+    promptText = prompt.trim();
+    if (!apiKey || apiKey.includes("paste_your")) return Response.json(normalizeParsedRequirements({}, promptText));
 
     const configuredModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
     const model = configuredModel === "gemini-3.5-flash" ? "gemini-2.5-flash" : configuredModel;
@@ -65,9 +68,11 @@ export async function POST(request: Request) {
             "If the prompt asks for laundry, include \"laundry\" in features. If it asks for utility, include \"utility\" in features. If it asks for porch, veranda, or front sit-out, include \"porch\" in features. If it asks for open plan or open dining, include \"open_space\" in features.",
             "Preserve important placement requirements like front-left, front-right, center-right, near kitchen, near bath, and opens to hallway in adjacency.",
             "Extract layout intent: round/circular hallway means circulationStyle loop; courtyard means layoutType courtyard and circulationStyle courtyard_ring; open plan means layoutType open; duplex means layoutType duplex; garage side/front/rear should set garageMode.",
+            "A ground-floor plan with an internal staircase is valid: interpret it as the ground-floor level with stair access for a future/upper floor. Do not mark this as a contradiction.",
+            "A duplex-style ground-floor prompt is valid when the user is asking to draw only the ground-floor plan with duplex-style layout intent.",
             "Use \"unspecified\" when orientation or road side is missing.",
             "Put contradictions, missing critical facts, and likely infeasible requests in warnings.",
-            `User prompt: ${prompt.trim()}`,
+            `User prompt: ${promptText}`,
           ].join("\n") }],
         }],
         generationConfig: {
@@ -81,10 +86,15 @@ export async function POST(request: Request) {
     if (!response.ok) throw new Error(data.error?.message || `Gemini request failed with status ${response.status}.`);
 
     const parsed = readGeminiJson(data);
-    return Response.json(normalizeParsedRequirements(parsed as Record<string, unknown>, prompt.trim()));
+    return Response.json(normalizeParsedRequirements(parsed as Record<string, unknown>, promptText));
   } catch (error) {
     const message = error instanceof Error ? error.message : "The AI request failed.";
     console.error("Requirement parser failed:", message);
+    if (promptText) {
+      const fallback = normalizeParsedRequirements({}, promptText);
+      fallback.warnings = [...fallback.warnings, toFriendlyError(message)];
+      return Response.json(fallback);
+    }
     return Response.json({ error: toFriendlyError(message) }, { status: 502 });
   }
 }

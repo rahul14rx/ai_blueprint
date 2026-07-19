@@ -87,11 +87,19 @@ function roomHasUsableDoor(room: Room, plan: FloorPlan, brief: Brief) {
 }
 
 function roomNeedsExplicitDoor(room: Room) {
-  return ["bedroom", "bathroom", "garage", "stairs", "utility", "laundry", "pantry", "study"].includes(room.type);
+  return ["bedroom", "bathroom", "garage", "stairs", "utility", "laundry", "pantry", "study", "storage"].includes(room.type);
 }
 
 function roomHasDoorToCirculation(room: Room, plan: FloorPlan) {
   return doorTargetsForRoom(room, plan).some(isCirculationLike);
+}
+
+function roomHasDoorToAny(room: Room, plan: FloorPlan, types: RoomType[]) {
+  return doorTargetsForRoom(room, plan).some(target => types.includes(target.type) || isCirculationLike(target));
+}
+
+function garageHasInternalAccess(room: Room, plan: FloorPlan) {
+  return doorTargetsForRoom(room, plan).some(target => isCirculationLike(target) || ["utility", "storage", "living"].includes(target.type));
 }
 
 function bathroomHasValidDoor(room: Room, plan: FloorPlan) {
@@ -191,6 +199,7 @@ function anyNearAcrossHall(plan: FloorPlan, first: RoomType, second: RoomType) {
 
 export function evaluateArchitecture(brief: Brief, plan: FloorPlan): ArchitectureReport {
   const issues: ArchitectureIssue[] = [];
+  const graph = buildAccessGraph(plan);
   const reachable = reachableRooms(plan, brief);
 
   if (countRooms(plan, "bedroom") < brief.bedrooms) add(issues, "error", "brief", `Plan has fewer bedrooms than requested (${countRooms(plan, "bedroom")} of ${brief.bedrooms}).`);
@@ -218,12 +227,26 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
       if (clearWidth < toUnit(brief, 3.5)) add(issues, "error", "access", `${room.name} is narrower than the recommended 3.5 ft clear passage.`);
     }
 
+    if (isCirculationLike(room) && room.type !== "porch" && !reachable.has(room.id)) {
+      add(issues, "error", "access", `${room.name} is disconnected from the main entry circulation path.`);
+    }
+    if (isCirculationLike(room) && reachable.has(room.id) && !roomHasRoadDoor(room, plan, brief) && (graph.get(room.id)?.size ?? 0) <= 1 && room.width * room.depth > toUnit(brief, 55)) {
+      add(issues, "warning", "access", `${room.name} behaves like a large dead-end circulation pocket.`);
+    }
     if (rule.needsAccess && !reachable.has(room.id)) add(issues, "error", "access", `${room.name} is not clearly reachable from the main entry/circulation path.`);
     if (roomNeedsExplicitDoor(room) && !roomHasUsableDoor(room, plan, brief)) add(issues, "error", "access", `${room.name} has no usable door opening.`);
     if (room.type === "bedroom" && !roomHasDoorToCirculation(room, plan)) add(issues, "error", "access", `${room.name} must have a door to a hallway, foyer, or circulation pocket.`);
     if (room.type === "bathroom" && !bathroomHasValidDoor(room, plan)) {
       const attached = room.name.toLowerCase().includes("attached");
       add(issues, "error", "access", attached ? `${room.name} must have a direct door to a bedroom.` : `${room.name} must have a door to circulation.`);
+    }
+    if (room.type === "garage" && !garageHasInternalAccess(room, plan)) add(issues, "error", "access", `${room.name} needs an internal access door to the house circulation.`);
+    if (room.type === "stairs" && !roomHasDoorToCirculation(room, plan)) add(issues, "error", "access", `${room.name} must connect to hallway, foyer, or circulation.`);
+    if (room.type === "storage" && !roomHasDoorToAny(room, plan, ["hallway", "foyer", "bedroom", "bathroom", "kitchen", "utility", "laundry", "pantry"])) {
+      add(issues, "error", "access", `${room.name} needs a reachable door to circulation or its parent room.`);
+    }
+    if (["utility", "laundry", "pantry"].includes(room.type) && !roomHasDoorToAny(room, plan, ["kitchen", "hallway", "foyer"])) {
+      add(issues, "warning", "access", `${room.name} should connect to the kitchen or service circulation.`);
     }
     if (rule.needsExterior && exteriorWalls(room, plan).length === 0 && !hasVentilation(room, plan) && !hasBorrowedLight(room, plan)) add(issues, "warning", "light", `${room.name} has no exterior wall for natural light/ventilation.`);
     if (rule.needsExterior && exteriorWalls(room, plan).length > 0 && !hasWindow(room, plan)) add(issues, "warning", "light", `${room.name} touches an exterior wall but has no window opening.`);

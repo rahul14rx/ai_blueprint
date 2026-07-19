@@ -15,9 +15,11 @@ const { createProject, finalPlanErrors, parseBrief, validatePlans } = await vite
 const { evaluateArchitecture } = await vite.ssrLoadModule("/app/architecture-validator.ts");
 const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasibility.ts");
 const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
+const { POST: parseRequirementsPost } = await vite.ssrLoadModule("/app/api/parse-requirements/route.ts");
 const { exteriorWalls, isCirculationLike, needsWetVentilation, placementDistance, roomExceedsMaximum, sharedWall } = await vite.ssrLoadModule("/app/layout-rules.ts");
 const { buildPlan3DGeometry } = await vite.ssrLoadModule("/app/plan-3d-geometry.ts");
 const { getDoorLeafPlacement, getEntryPath, getMainEntryPlacement, getOpeningPlacement } = await vite.ssrLoadModule("/app/plan-openings.ts");
+const { applyBriefRevision, buildLocalRevisionPatch } = await vite.ssrLoadModule("/app/brief-revision.ts");
 
 function makeBrief(overrides) {
   return {
@@ -88,7 +90,7 @@ function assertAccessOpenings(plan, brief) {
       const attached = room.name.toLowerCase().includes("attached");
       assert.ok(targets.some(target => attached ? target.type === "bedroom" : isCirculationLike(target)), attached ? `${room.name} needs a bedroom door` : `${room.name} needs a circulation door`);
     }
-    if (["stairs", "utility", "laundry", "pantry", "study"].includes(room.type)) assert.ok(targets.length > 0, `${room.name} needs a usable door`);
+    if (["stairs", "utility", "laundry", "pantry", "study", "storage"].includes(room.type)) assert.ok(targets.length > 0, `${room.name} needs a usable door`);
     if (room.type === "garage") {
       const roadDoor = roadSide !== "unspecified" && exteriorWalls(room, plan).includes(roadSide) && plan.openings.some(opening => opening.kind === "door" && opening.roomId === room.id && opening.wall === roadSide);
       assert.ok(roadDoor, `${room.name} needs a vehicle door to the road`);
@@ -291,6 +293,65 @@ test("48x70 north-facing 4BHK can place larger programs without falling back", (
   }), { garage: true, utility: true, pantry: true, porch: true, study: true, minScore: 80 });
 });
 
+test("4BHK with attached bath does not reuse Bedroom 1 row for Bedroom 4", () => {
+  const prompt = "Create a 46 ft x 64 ft north-facing ground-floor house with 4 bedrooms, 1 attached bathroom, kitchen, dining, family lounge, utility, pantry, and road/main entry on north side. Bedroom 1 must have the attached bath and all bedrooms must open to circulation.";
+  const brief = normalizeParsedRequirements({
+    plotWidth: 46,
+    plotDepth: 64,
+    unit: "feet",
+    floors: 1,
+    bedrooms: 4,
+    bathrooms: 1,
+    livingRooms: 0,
+    kitchens: 1,
+    diningRooms: 1,
+    facing: "north",
+    roadSide: "north",
+    features: ["utility", "pantry"],
+    adjacency: ["attached bathroom to Bedroom 1", "bedrooms open to circulation"],
+    warnings: [],
+  }, prompt);
+
+  assert.equal(brief.livingRooms, 1, "family lounge should count as the public living/great room");
+  const { plan } = assertQuality(brief, { utility: true, pantry: true, minScore: 70 });
+  const bedroom1 = plan.rooms.find(room => room.name === "Bedroom 1");
+  const bedroom4 = plan.rooms.find(room => room.name === "Bedroom 4");
+  const attached = plan.rooms.find(room => room.name === "Attached bath");
+  assert.ok(bedroom1 && bedroom4 && attached, "fixture rooms should exist");
+  assert.equal(sharedWall(bedroom1, attached) !== null, true, "Bedroom 1 should touch attached bath");
+  assert.equal(sharedWall(bedroom4, attached) === null || !doorTargets(plan, attached).some(room => room.name === "Bedroom 4"), true, "attached bath should not be assigned through Bedroom 4");
+});
+
+test("50x70 east-facing 4BHK with formal living and family lounge keeps rows clean", () => {
+  const prompt = "Create a 50 ft x 70 ft east-facing ground-floor house with the road and main entrance on the east side. Include 4 bedrooms, 3 bathrooms, a formal living room, family lounge, dining room, kitchen, pantry, utility room, pooja room, study room, laundry room, linen storage, and a two-car garage. Place the foyer and living room near the east entrance. The garage should be on the front side with an internal door to the house. Position the kitchen beside the dining room, with the pantry and utility room directly connected to the kitchen. The master bedroom should have an attached bathroom, while the remaining bedrooms should be on the quieter west side. One common bathroom should open from the hallway. Every enclosed room must have a usable door connected to a hallway or parent room. Add exterior windows wherever possible. Ensure there are no overlaps and that all rooms remain completely inside the 50 ft x 70 ft plot.";
+  const brief = normalizeParsedRequirements({
+    plotWidth: 50,
+    plotDepth: 70,
+    unit: "feet",
+    floors: 1,
+    bedrooms: 4,
+    bathrooms: 3,
+    livingRooms: 1,
+    kitchens: 1,
+    diningRooms: 1,
+    facing: "east",
+    roadSide: "east",
+    features: ["garage", "utility", "pantry", "study", "laundry", "prayer_room"],
+    adjacency: ["master bedroom attached bathroom", "kitchen beside dining", "garage internal door"],
+    warnings: [],
+  }, prompt);
+
+  assert.equal(brief.livingRooms, 2, "formal living plus family lounge should produce two public rooms");
+  const { plan } = assertQuality(brief, { garage: true, utility: true, minScore: 62 });
+  const bedroom1 = plan.rooms.find(room => room.name === "Bedroom 1");
+  const bedroom4 = plan.rooms.find(room => room.name === "Bedroom 4");
+  const attached = plan.rooms.find(room => room.name === "Attached bath");
+  assert.ok(bedroom1 && bedroom4 && attached, "fixture rooms should exist");
+  assert.equal(sharedWall(bedroom1, attached) !== null, true, "Bedroom 1 should touch attached bath");
+  assert.equal(sharedWall(bedroom4, attached) === null || !doorTargets(plan, attached).some(room => room.name === "Bedroom 4"), true, "attached bath should not be assigned through Bedroom 4");
+  assert.ok(plan.rooms.some(room => room.name === "Family lounge" && room.type === "living"), "family lounge should be visible as a second living room");
+});
+
 test("impossibly tight briefs are reported as blocking instead of accepted", () => {
   const blocking = assertBlocking(makeBrief({
     prompt: "Create a 16 ft x 22 ft south-facing single-floor house with 3 bedrooms, 2 bathrooms, kitchen, dining, living room and garage.",
@@ -340,6 +401,34 @@ test("attached bathrooms require a direct bedroom door", () => {
   };
   const report = evaluateArchitecture(brief, plan);
   assert.ok(report.errors.some(message => /direct door to a bedroom/i.test(message)), report.errors.join("\n"));
+});
+
+test("storage and linen rooms require a usable access door", () => {
+  const brief = makeBrief({ plotWidth: 24, plotDepth: 32, bedrooms: 1, bathrooms: 1, livingRooms: 0, kitchens: 0, diningRooms: 0 });
+  const plan = {
+    id: "inaccessible-storage-plan",
+    level: 0,
+    elevation: 0,
+    width: 24,
+    depth: 32,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 16, y: 0, width: 8, depth: 8, color: "#fff" },
+      { id: "hall", name: "Central hallway", type: "hallway", x: 12, y: 0, width: 4, depth: 32, color: "#fff" },
+      { id: "bed", name: "Bedroom 1", type: "bedroom", x: 0, y: 8, width: 12, depth: 12, color: "#fff" },
+      { id: "linen", name: "Linen", type: "storage", x: 16, y: 8, width: 8, depth: 6, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "foyer-hall", kind: "door", wall: "west", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "bed-hall", kind: "door", wall: "east", roomId: "bed", offset: 0.5, width: 3 },
+    ],
+  };
+
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /Linen has no usable door opening|Linen needs a reachable door/i.test(message)), report.errors.join("\n"));
 });
 
 test("connected kitchen and dining require a passable opening", () => {
@@ -407,6 +496,67 @@ test("road-facing plans require a visible main entry door", () => {
   };
   const report = evaluateArchitecture(brief, plan);
   assert.ok(report.errors.some(message => /main entry\/gate/i.test(message)), report.errors.join("\n"));
+});
+
+test("garage requires internal access to house circulation", () => {
+  const brief = makeBrief({
+    bedrooms: 0,
+    bathrooms: 0,
+    livingRooms: 0,
+    kitchens: 0,
+    diningRooms: 0,
+    features: ["garage"],
+  });
+  const plan = {
+    id: "garage-access-plan",
+    level: 0,
+    elevation: 0,
+    width: 40,
+    depth: 60,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 24, y: 0, width: 16, depth: 10, color: "#fff" },
+      { id: "garage", name: "Garage", type: "garage", x: 24, y: 34, width: 16, depth: 18, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "garage-door", kind: "door", wall: "east", roomId: "garage", offset: 0.5, width: 8 },
+    ],
+  };
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /internal access door/i.test(message)), report.errors.join("\n"));
+});
+
+test("disconnected circulation pockets are blocking issues", () => {
+  const brief = makeBrief({
+    bedrooms: 0,
+    bathrooms: 0,
+    livingRooms: 0,
+    kitchens: 0,
+    diningRooms: 0,
+    features: [],
+  });
+  const plan = {
+    id: "disconnected-hall-plan",
+    level: 0,
+    elevation: 0,
+    width: 40,
+    depth: 60,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 24, y: 0, width: 16, depth: 10, color: "#fff" },
+      { id: "hall", name: "Central hallway", type: "hallway", x: 18, y: 20, width: 4, depth: 30, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+    ],
+  };
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.errors.some(message => /disconnected from the main entry circulation path/i.test(message)), report.errors.join("\n"));
 });
 
 test("bathrooms are not labeled attached unless requested", () => {
@@ -498,6 +648,85 @@ test("local parser respects no separate dining room", () => {
   assert.equal(brief.livingRooms, 1);
   assert.equal(brief.kitchens, 1);
   assert.equal(brief.diningRooms, 0);
+});
+
+test("parse API falls back locally when Gemini quota is reached", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-key";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: { message: "Resource exhausted: quota exceeded", code: 429 },
+  }), { status: 429, headers: { "Content-Type": "application/json" } });
+
+  try {
+    const response = await parseRequirementsPost(new Request("http://localhost/api/parse-requirements", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt: "Create a modern 40 ft x 60 ft east-facing house with 2 bedrooms, 2 bathrooms, kitchen, dining, living room, garage, staircase, and utility. The road is on the east side.",
+      }),
+    }));
+    const brief = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(brief.plotWidth, 40);
+    assert.equal(brief.roadSide, "east");
+    assert.equal(brief.bedrooms, 2);
+    assert.ok(brief.features.includes("garage"));
+    assert.ok(brief.warnings.some(message => /local parser fallback/i.test(message)), brief.warnings.join("\n"));
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  }
+});
+
+test("complex north-facing staircase prompt keeps living count sane and attached bath connected", () => {
+  const prompt = "Create a 45 ft x 65 ft north-facing duplex-style ground-floor house with the road and main entry gate on the north side. Include 3 bedrooms, 3 bathrooms, a double-height living room, open dining area, kitchen, pantry, utility room, internal staircase, family lounge, and one-car garage. Use a courtyard-style layout with a central open-to-sky courtyard and a loop circulation corridor around it. Place the living room and foyer near the north entry, garage on the northwest/front-left side, kitchen and dining on the east side near the courtyard, utility and pantry behind the kitchen, bedrooms toward the south/private side, and staircase near the courtyard so it is clearly visible and goes upward. One bathroom must be attached to Bedroom 1, one bathroom should open from the hallway, and one bathroom should be near the family lounge. Add exterior windows where possible. All rooms must remain inside the plot, no overlaps, and every room must connect through clear circulation.";
+  const brief = normalizeParsedRequirements({
+    plotWidth: 45,
+    plotDepth: 65,
+    unit: "feet",
+    floors: 1,
+    bedrooms: 3,
+    bathrooms: 3,
+    livingRooms: 2,
+    kitchens: 1,
+    diningRooms: 1,
+    facing: "north",
+    roadSide: "north",
+    features: ["garage", "internal_staircase", "utility", "pantry"],
+    adjacency: ["one bathroom attached to Bedroom 1"],
+    warnings: [],
+  }, prompt);
+
+  assert.equal(brief.livingRooms, 1, "double-height living should not be treated as two living rooms");
+  const plan = createProject(brief).plans[0];
+  assert.deepEqual(finalPlanErrors(brief, plan), []);
+
+  const bedroom1 = plan.rooms.find(room => room.name === "Bedroom 1");
+  const attached = plan.rooms.find(room => room.name === "Attached bath");
+  assert.ok(bedroom1 && attached && sharedWall(bedroom1, attached), "attached bath should share a wall with Bedroom 1");
+  assert.ok(attached && doorTargets(plan, attached).some(room => room.name === "Bedroom 1"), "attached bath should have a direct door to Bedroom 1");
+
+  const linenRooms = plan.rooms.filter(room => /linen/i.test(room.name));
+  assert.ok(linenRooms.length > 0, "fixture should include linen rooms");
+  linenRooms.forEach(room => assert.ok(doorTargets(plan, room).length > 0, `${room.name} should have an access door`));
+});
+
+test("duplex-style ground-floor prompts with stairs are not treated as contradictions", () => {
+  const prompt = "Create a 45 ft x 65 ft north-facing duplex-style ground-floor house with internal staircase.";
+  const brief = normalizeParsedRequirements({
+    plotWidth: 45,
+    plotDepth: 65,
+    unit: "feet",
+    floors: 1,
+    features: ["internal_staircase"],
+    warnings: ["The request for a duplex-style ground-floor house with an internal staircase presents a contradiction."],
+  }, prompt);
+
+  assert.equal(brief.floors, 1);
+  assert.ok(brief.features.includes("internal_staircase"));
+  assert.deepEqual(brief.warnings, []);
 });
 
 test("API normalizer overrides negated shared-room counts", () => {
@@ -701,4 +930,98 @@ test("generated main entry continues into the circulation network", () => {
     const targets = doorTargets(plan, entry.room);
     assert.ok(targets.some(target => target.type === "hallway" || target.type === "foyer" || target.name.toLowerCase().includes("lobby") || target.name.toLowerCase().includes("passage")), `${entry.room.name} should continue into circulation`);
   }
+});
+
+test("brief revision adds adjacency without erasing protected counts", () => {
+  const current = makeBrief({
+    prompt: "Create a 40 ft x 60 ft east-facing house with 2 bedrooms, 2 bathrooms, kitchen, dining, living room, garage, staircase, and utility. The road is on the east side.",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: [],
+  });
+  const patch = buildLocalRevisionPatch(current, "move kitchen closer to dining and make the hallway wider");
+  const result = applyBriefRevision(current, patch, "move kitchen closer to dining and make the hallway wider");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.brief.bedrooms, 2);
+  assert.equal(result.brief.bathrooms, 2);
+  assert.equal(result.brief.plotWidth, 40);
+  assert.equal(result.brief.roadSide, "east");
+  assert.ok(result.brief.adjacency.some(item => /kitchen beside dining/i.test(item)));
+  assert.ok(result.brief.adjacency.some(item => /hallway/i.test(item)));
+  assert.notEqual(result.brief, current);
+});
+
+test("brief revision rejects vague changes and keeps the current brief", () => {
+  const current = makeBrief({ prompt: "Create a simple 2 bedroom house." });
+  const patch = buildLocalRevisionPatch(current, "make it nicer");
+  const result = applyBriefRevision(current, patch, "make it nicer");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.brief, current);
+  assert.ok(result.errors.some(message => /concrete|specific/i.test(message)));
+});
+
+test("brief revision blocks infeasible changes without replacing the old brief", () => {
+  const current = makeBrief({
+    prompt: "Create a 28 ft x 42 ft south-facing single-floor house with 3 bedrooms, 2 bathrooms, living room and kitchen.",
+    plotWidth: 28,
+    plotDepth: 42,
+    bedrooms: 3,
+    bathrooms: 2,
+    diningRooms: 0,
+    facing: "south",
+    roadSide: "south",
+  });
+  const result = applyBriefRevision(current, {
+    changeSummary: "Change to 12 bedrooms.",
+    set: { bedrooms: 12 },
+  }, "change to 12 bedrooms");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.brief, current);
+  assert.ok(result.errors.length > 0);
+  assert.equal(current.bedrooms, 3);
+});
+
+test("brief revision ignores AI-invented room count changes without explicit count words", () => {
+  const current = makeBrief({
+    prompt: "Create a 40 ft x 60 ft east-facing house with 2 bedrooms, 2 bathrooms, kitchen, dining, living room, garage, staircase, and utility.",
+    bedrooms: 2,
+    bathrooms: 2,
+    diningRooms: 1,
+    features: ["garage", "internal_staircase", "utility"],
+  });
+  const result = applyBriefRevision(current, {
+    changeSummary: "Removed one bedroom and added a second dining area.",
+    set: { bedrooms: 1, diningRooms: 2 },
+    addAdjacency: ["kitchen beside dining room"],
+  }, "move kitchen closer to dining and make hallway wider");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.brief.bedrooms, 2);
+  assert.equal(result.brief.diningRooms, 1);
+  assert.deepEqual(result.changedFields, ["adjacency"]);
+});
+
+test("garage lobby replacement request changes the generated east-west room block", () => {
+  const base = makeBrief({
+    prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, living room, kitchen beside dining room, one-car garage, internal staircase and utility room. The road is on the east side.",
+    plotWidth: 40,
+    plotDepth: 60,
+    bedrooms: 2,
+    bathrooms: 2,
+    diningRooms: 1,
+    facing: "east",
+    roadSide: "east",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: ["kitchen beside dining room"],
+  });
+  const patch = buildLocalRevisionPatch(base, "remove garage lobby and replace it with dining area without changing room counts");
+  const revised = applyBriefRevision(base, patch, "remove garage lobby and replace it with dining area without changing room counts");
+  assert.equal(revised.ok, true);
+
+  const plan = createProject(revised.brief).plans[0];
+  assert.ok(!plan.rooms.some(room => /garage lobby|mudroom/i.test(room.name)), "garage lobby should be removed");
+  assert.ok(plan.rooms.some(room => room.name === "Dining extension" && room.type === "dining"), "replacement dining block should be visible");
+  assert.equal(finalPlanErrors(revised.brief, plan).length, 0);
 });

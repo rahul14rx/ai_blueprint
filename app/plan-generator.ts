@@ -11,6 +11,13 @@ const overlap = (a1: number, a2: number, b1: number, b2: number) => Math.min(a2,
 const feet = (brief: Brief, value: number) => brief.unit === "feet" ? value : value * 0.3048;
 const target = (brief: Brief, min: number, ideal: number, max: number, available: number) => clamp(feet(brief, ideal), feet(brief, min), Math.min(feet(brief, max), available));
 const wantsRoundedLiving = (brief: Brief) => /\b(round|rounded|curved|curve|semi[-\s]?circular|circular)\b.*\b(living|lounge|great room)\b|\b(living|lounge|great room)\b.*\b(round|rounded|curved|curve|semi[-\s]?circular|circular)\b/i.test(brief.prompt);
+const intentText = (brief: Brief) => `${brief.prompt} ${brief.adjacency.join(" ")}`.toLowerCase();
+const wantsGarageLobbyReplacement = (brief: Brief, targetRoom: "dining" | "pantry" | "storage") => {
+  const text = intentText(brief);
+  const targetPattern = targetRoom === "dining" ? /\b(dining|dining area|dining room)\b/ : targetRoom === "pantry" ? /\bpantry\b/ : /\b(storage|store)\b/;
+  return /\b(remove|delete|replace|without|no|skip)\b[^.?!;\n]{0,60}\b(garage lobby|mudroom|mud room)\b/i.test(text) && targetPattern.test(text);
+};
+const wantsNoGarageLobby = (brief: Brief) => /\b(remove|delete|without|no|skip)\b[^.?!;\n]{0,60}\b(garage lobby|mudroom|mud room)\b/i.test(intentText(brief));
 const OPTIONAL_FEATURES = ["garage", "internal_staircase", "utility", "balcony", "roof_garden", "study", "pantry", "laundry", "porch", "open_space", "prayer_room"];
 const NUMBER_WORDS: Record<string, number> = { one: 1, single: 1, two: 2, double: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
 type Direction = "north" | "south" | "east" | "west";
@@ -56,6 +63,15 @@ function inferSharedRoomCount(text: string, labels: string[], defaultWhenMention
   return new RegExp(`\\b(?:${labelPattern})\\b`, "i").test(text) ? defaultWhenMentioned : undefined;
 }
 
+function inferLivingRoomCount(text: string) {
+  const inferred = inferSharedRoomCount(text, ["living room", "living", "great room", "lounge", "family lounge", "family room"]);
+  if (inferred !== 1) return inferred;
+  const hasFormalLiving = /\bformal\s+living(?:\s+room)?\b/i.test(text);
+  const hasFamilyLounge = /\bfamily\s+(?:lounge|room)\b/i.test(text);
+  const doubleHeightOnly = /\bdouble[-\s]?height\b[^.?!;\n]{0,40}\b(living|great room|lounge)\b|\b(living|great room|lounge)\b[^.?!;\n]{0,40}\bdouble[-\s]?height\b/i.test(text);
+  return hasFormalLiving && hasFamilyLounge && !doubleHeightOnly ? 2 : inferred;
+}
+
 function inferPlot(text: string): Pick<Brief, "plotWidth" | "plotDepth" | "unit"> | null {
   const match = text.match(/\b(\d+(?:\.\d+)?)\s*(?:ft|feet|foot|m|meter|metre|meters|metres)?\s*(?:x|×|by)\s*(\d+(?:\.\d+)?)\s*(ft|feet|foot|m|meter|metre|meters|metres)\b/);
   if (!match) return null;
@@ -83,7 +99,7 @@ export function parseBrief(prompt: string, form: Partial<Brief>): Brief {
   const inferredFloors = inferFloorCount(lower);
   const inferredBedrooms = firstCount(lower, /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:bed|bedroom|bedrooms)\b/);
   const inferredBathrooms = inferBathroomCount(lower);
-  const inferredLivingRooms = inferSharedRoomCount(lower, ["living room", "living", "great room", "lounge", "family room"]);
+  const inferredLivingRooms = inferLivingRoomCount(lower);
   const inferredKitchens = inferSharedRoomCount(lower, ["kitchen"]);
   const inferredDiningRooms = inferSharedRoomCount(lower, ["dining room", "dining area", "dining nook", "dining"]);
   const inferredPlot = inferPlot(lower);
@@ -282,7 +298,15 @@ function makeEastWestPlan(brief: Brief, level: number, roadSide: "east" | "west"
   const lobbyH = D - garageH - lobbyTop;
   if (lobbyH >= feet(brief, 4)) {
     const requestedStudy = brief.features.includes("study") && lobbyH >= feet(brief, 8);
-    rooms.push(room(level, requestedStudy ? "Study" : brief.features.includes("garage") ? "Mudroom / garage lobby" : "Service pocket", requestedStudy ? "study" : "storage", leftW + hallW, lobbyTop, rightW, lobbyH));
+    if (wantsGarageLobbyReplacement(brief, "dining")) {
+      rooms.push(room(level, "Dining extension", "dining", leftW + hallW, lobbyTop, rightW, lobbyH));
+    } else if (wantsGarageLobbyReplacement(brief, "pantry")) {
+      rooms.push(room(level, "Pantry", "pantry", leftW + hallW, lobbyTop, rightW, lobbyH));
+    } else if (wantsNoGarageLobby(brief)) {
+      rooms.push(room(level, "Storage", "storage", leftW + hallW, lobbyTop, rightW, lobbyH));
+    } else {
+      rooms.push(room(level, requestedStudy ? "Study" : brief.features.includes("garage") ? "Mudroom / garage lobby" : "Service pocket", requestedStudy ? "study" : "storage", leftW + hallW, lobbyTop, rightW, lobbyH));
+    }
   }
   if (brief.features.includes("garage")) rooms.push(room(level, "Garage", "garage", leftW + hallW, D - garageH, rightW, garageH));
 
@@ -361,9 +385,20 @@ function makeNorthSouthPlan(brief: Brief, level: number, roadSide: "north" | "so
 }
 
 function makeFloorPlan(brief: Brief, level: number, rooms: Room[]): FloorPlan {
-  const plan = { id: `floor-${level}-${uid()}`, level, elevation: level * (brief.unit === "feet" ? 10 : 3.05), width: brief.plotWidth, depth: brief.plotDepth, unit: brief.unit, facing: brief.facing, roadSide: brief.roadSide, rooms, openings: [] as Opening[] };
+  const planRooms = applyGeneratedRoomIntent(brief, rooms);
+  const plan = { id: `floor-${level}-${uid()}`, level, elevation: level * (brief.unit === "feet" ? 10 : 3.05), width: brief.plotWidth, depth: brief.plotDepth, unit: brief.unit, facing: brief.facing, roadSide: brief.roadSide, rooms: planRooms, openings: [] as Opening[] };
   plan.openings = generateOpenings(plan, brief);
   return plan;
+}
+
+function applyGeneratedRoomIntent(brief: Brief, rooms: Room[]) {
+  if (!wantsNoGarageLobby(brief)) return rooms;
+  return rooms.map(item => {
+    if (!/\b(garage lobby|mudroom|mud room)\b/i.test(item.name)) return item;
+    if (wantsGarageLobbyReplacement(brief, "dining")) return { ...item, name: "Dining extension", type: "dining" as RoomType, color: ROOM_COLORS.dining };
+    if (wantsGarageLobbyReplacement(brief, "pantry")) return { ...item, name: "Pantry", type: "pantry" as RoomType, color: ROOM_COLORS.pantry };
+    return { ...item, name: "Storage", type: "storage" as RoomType, color: ROOM_COLORS.storage };
+  });
 }
 
 function generateOpenings(plan: FloorPlan, brief: Brief): Opening[] {
@@ -377,7 +412,7 @@ function generateOpenings(plan: FloorPlan, brief: Brief): Opening[] {
     const directBedroomBath = r.type === "bathroom" && r.name.toLowerCase().includes("attached")
       ? plan.rooms.find(other => other.type === "bedroom" && other.name === "Bedroom 1" && sharedWall(r, other))
       : null;
-    const accessRoom = directBedroomBath ?? plan.rooms.find(other => other.id !== r.id && isDoorTarget(r, other) && sharedWall(r, other));
+    const accessRoom = directBedroomBath ?? pickDoorTarget(r, plan, brief, openings);
     const doorWall = accessRoom ? sharedWall(r, accessRoom) : null;
     if (doorWall && accessRoom && !isDoorlessCirculation(r)) {
       const width = Math.min(doorWidth, doorWall === "north" || doorWall === "south" ? r.width * 0.35 : r.depth * 0.35);
@@ -410,7 +445,7 @@ function generateOpenings(plan: FloorPlan, brief: Brief): Opening[] {
     });
   });
 
-  return openings;
+  return ensureRequiredAccessOpenings(plan, brief, openings);
 }
 
 function isAccessRoom(room: Room) {
@@ -425,9 +460,190 @@ function isDoorTarget(room: Room, target: Room) {
     "utility:kitchen", "utility:bathroom",
     "laundry:kitchen", "laundry:bathroom",
     "pantry:kitchen",
+    "storage:hallway", "storage:bathroom", "storage:bedroom", "storage:kitchen", "storage:utility", "storage:laundry", "storage:pantry",
+    "bathroom:storage", "utility:storage", "laundry:storage", "pantry:storage",
     "kitchen:dining",
     "dining:kitchen",
   ].includes(`${room.type}:${target.type}`);
+}
+
+function sharedOverlap(room: Room, target: Room, wall: Opening["wall"]) {
+  return wall === "north" || wall === "south"
+    ? overlap(room.x, room.x + room.width, target.x, target.x + target.width)
+    : overlap(room.y, room.y + room.depth, target.y, target.y + target.depth);
+}
+
+function openingSpan(owner: Room, opening: Opening) {
+  const horizontal = opening.wall === "north" || opening.wall === "south";
+  const roomStart = horizontal ? owner.x : owner.y;
+  const roomLength = horizontal ? owner.width : owner.depth;
+  const start = roomStart + (roomLength - opening.width) * opening.offset;
+  return { horizontal, start, end: start + opening.width };
+}
+
+function openingTargetRoom(plan: FloorPlan, owner: Room, opening: Opening) {
+  const span = openingSpan(owner, opening);
+  return plan.rooms.filter(room => room.id !== owner.id && sharedWall(owner, room) === opening.wall).find(room => {
+    const targetStart = span.horizontal ? room.x : room.y;
+    const targetEnd = span.horizontal ? room.x + room.width : room.y + room.depth;
+    return overlap(span.start, span.end, targetStart, targetEnd) > Math.min(feet({ unit: plan.unit } as Brief, 1), opening.width * 0.45);
+  }) ?? null;
+}
+
+function hasDoorBetween(openings: Opening[], plan: FloorPlan, room: Room, target: Room) {
+  return openings.some(opening => {
+    if (opening.kind !== "door") return false;
+    const owner = plan.rooms.find(candidate => candidate.id === opening.roomId);
+    if (!owner) return false;
+    const resolvedTarget = openingTargetRoom(plan, owner, opening);
+    return (owner.id === room.id && resolvedTarget?.id === target.id) || (owner.id === target.id && resolvedTarget?.id === room.id);
+  });
+}
+
+function doorTargetsForRoom(openings: Opening[], plan: FloorPlan, room: Room) {
+  const targets: Room[] = [];
+  openings.filter(opening => opening.kind === "door").forEach(opening => {
+    const owner = plan.rooms.find(candidate => candidate.id === opening.roomId);
+    if (!owner) return;
+    const target = openingTargetRoom(plan, owner, opening);
+    if (owner.id === room.id && target) targets.push(target);
+    if (target?.id === room.id) targets.push(owner);
+  });
+  return targets;
+}
+
+function doorTargetScore(room: Room, target: Room) {
+  const circulation = isAccessRoom(target);
+  const attachedBath = room.type === "bathroom" && room.name.toLowerCase().includes("attached");
+  if (attachedBath) {
+    if (target.type === "bedroom" && target.name === "Bedroom 1") return 320;
+    if (target.type === "bedroom") return 280;
+    return -1;
+  }
+  if (room.type === "bedroom") return circulation ? 300 : -1;
+  if (room.type === "bathroom") return circulation ? 290 : target.type === "storage" ? 90 : -1;
+  if (room.type === "stairs") return circulation ? 280 : -1;
+  if (room.type === "garage") return circulation ? 260 : ["utility", "storage", "living"].includes(target.type) ? 170 : -1;
+  if (room.type === "utility" || room.type === "laundry") {
+    if (target.type === "kitchen") return 260;
+    if (circulation) return 240;
+    if (target.type === "bathroom" || target.type === "storage") return 130;
+  }
+  if (room.type === "pantry") {
+    if (target.type === "kitchen") return 280;
+    if (circulation) return 220;
+    if (target.type === "storage") return 120;
+  }
+  if (room.type === "storage") {
+    if (circulation) return 260;
+    if (["utility", "laundry", "pantry", "kitchen"].includes(target.type)) return 210;
+    if (target.type === "bathroom") return 170;
+    if (target.type === "bedroom") return 150;
+  }
+  if ((room.type === "kitchen" && target.type === "dining") || (room.type === "dining" && target.type === "kitchen")) return 220;
+  if (circulation) return 110;
+  return isDoorTarget(room, target) ? 70 : -1;
+}
+
+function doorCandidates(room: Room, plan: FloorPlan, openings: Opening[]) {
+  return plan.rooms
+    .filter(target => target.id !== room.id)
+    .map(target => ({ target, wall: sharedWall(room, target) }))
+    .filter((candidate): candidate is { target: Room; wall: Opening["wall"] } => !!candidate.wall)
+    .filter(candidate => (isDoorTarget(room, candidate.target) || isDoorTarget(candidate.target, room)) && !hasDoorBetween(openings, plan, room, candidate.target));
+}
+
+function pickDoorTarget(room: Room, plan: FloorPlan, _brief: Brief, openings: Opening[]) {
+  return doorCandidates(room, plan, openings)
+    .map(candidate => ({ ...candidate, score: Math.max(doorTargetScore(room, candidate.target), doorTargetScore(candidate.target, room) - 20) }))
+    .filter(candidate => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || sharedOverlap(room, b.target, b.wall) - sharedOverlap(room, a.target, a.wall))[0]?.target ?? null;
+}
+
+function addDoorOpening(openings: Opening[], plan: FloorPlan, brief: Brief, room: Room, target: Room, reason: string) {
+  if (hasDoorBetween(openings, plan, room, target)) return false;
+  const wall = sharedWall(room, target);
+  if (!wall) return false;
+  const width = Math.min(feet(brief, isAccessRoom(room) && isAccessRoom(target) ? 4 : 3), wall === "north" || wall === "south" ? room.width * 0.5 : room.depth * 0.5);
+  openings.push({ id: `door-${reason}-${room.id}-${target.id}`, kind: "door", wall, roomId: room.id, offset: doorOffset(room, target, wall, width), width });
+  return true;
+}
+
+function roomHasRoadDoorFromOpenings(openings: Opening[], room: Room, plan: FloorPlan, brief: Brief) {
+  const roadSide = brief.roadSide !== "unspecified" ? brief.roadSide : brief.facing;
+  return roadSide !== "unspecified" && touchesExteriorWall(room, plan, roadSide) && openings.some(opening => opening.kind === "door" && opening.roomId === room.id && opening.wall === roadSide);
+}
+
+function roomNeedsGeneratedAccess(room: Room) {
+  return ["living", "kitchen", "bedroom", "bathroom", "dining", "garage", "stairs", "utility", "study", "pantry", "laundry", "storage"].includes(room.type);
+}
+
+function buildReachability(plan: FloorPlan, brief: Brief, openings: Opening[]) {
+  const graph = new Map<string, Set<string>>();
+  plan.rooms.forEach(room => graph.set(room.id, new Set()));
+  openings.filter(opening => opening.kind === "door").forEach(opening => {
+    const owner = plan.rooms.find(room => room.id === opening.roomId);
+    if (!owner) return;
+    const target = openingTargetRoom(plan, owner, opening);
+    if (!target) return;
+    graph.get(owner.id)?.add(target.id);
+    graph.get(target.id)?.add(owner.id);
+  });
+  for (let i = 0; i < plan.rooms.length; i++) {
+    for (let j = i + 1; j < plan.rooms.length; j++) {
+      const a = plan.rooms[i];
+      const b = plan.rooms[j];
+      if (!sharedWall(a, b)) continue;
+      if ((isAccessRoom(a) && isAccessRoom(b)) || (a.type === "kitchen" && b.type === "dining") || (a.type === "dining" && b.type === "kitchen")) {
+        graph.get(a.id)?.add(b.id);
+        graph.get(b.id)?.add(a.id);
+      }
+    }
+  }
+
+  const start = plan.rooms.find(room => isAccessRoom(room) && roomHasRoadDoorFromOpenings(openings, room, plan, brief)) ?? plan.rooms.find(room => room.type === "foyer") ?? plan.rooms.find(isAccessRoom);
+  const reachable = new Set<string>();
+  const queue = start ? [start.id] : [];
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (reachable.has(id)) continue;
+    reachable.add(id);
+    graph.get(id)?.forEach(next => { if (!reachable.has(next)) queue.push(next); });
+  }
+  return reachable;
+}
+
+function ensureRequiredAccessOpenings(plan: FloorPlan, brief: Brief, openings: Opening[]) {
+  const next = [...openings];
+  plan.rooms.forEach(room => {
+    const targets = doorTargetsForRoom(next, plan, room);
+    const attachedBath = room.type === "bathroom" && room.name.toLowerCase().includes("attached");
+    const hasRoadDoor = roomHasRoadDoorFromOpenings(next, room, plan, brief);
+    const hasUsableDoor = targets.length > 0 || hasRoadDoor;
+    const needsPriorityDoor =
+      (attachedBath && !targets.some(target => target.type === "bedroom")) ||
+      (room.type === "bedroom" && !targets.some(isAccessRoom)) ||
+      (room.type === "bathroom" && !attachedBath && !targets.some(isAccessRoom)) ||
+      (["stairs", "storage", "utility", "laundry", "pantry", "study"].includes(room.type) && !hasUsableDoor) ||
+      (room.type === "garage" && !targets.some(target => isAccessRoom(target) || ["utility", "storage", "living"].includes(target.type)));
+    if (!needsPriorityDoor) return;
+    const target = pickDoorTarget(room, plan, brief, next);
+    if (target) addDoorOpening(next, plan, brief, room, target, "repair");
+  });
+
+  for (let guard = 0; guard < plan.rooms.length; guard++) {
+    const reachable = buildReachability(plan, brief, next);
+    const unreachable = plan.rooms.find(room => roomNeedsGeneratedAccess(room) && !reachable.has(room.id));
+    if (!unreachable) break;
+    const bridge = doorCandidates(unreachable, plan, next)
+      .filter(candidate => reachable.has(candidate.target.id))
+      .map(candidate => ({ ...candidate, score: Math.max(doorTargetScore(unreachable, candidate.target), doorTargetScore(candidate.target, unreachable) - 20) }))
+      .filter(candidate => candidate.score > 0)
+      .sort((a, b) => b.score - a.score || sharedOverlap(unreachable, b.target, b.wall) - sharedOverlap(unreachable, a.target, a.wall))[0];
+    if (!bridge || !addDoorOpening(next, plan, brief, unreachable, bridge.target, "bridge")) break;
+  }
+
+  return next;
 }
 
 function isMainEntryRoom(room: Room) {

@@ -131,6 +131,55 @@ function Furniture({ room, y, color }: { room: Room; y: number; color: string })
   </group>;
 }
 
+function Staircase({ room, y, selected, onSelect }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void }) {
+  const alongZ = room.depth >= room.width;
+  const steps = Math.max(7, Math.min(12, Math.floor((alongZ ? room.depth : room.width) / 1.05)));
+  const run = Math.max(0.55, Math.min(1.05, (alongZ ? room.depth : room.width) * 0.74 / steps));
+  const stairWidth = Math.max(2.8, Math.min((alongZ ? room.width : room.depth) * 0.64, 5.2));
+  const startX = room.x + room.width / 2;
+  const startZ = room.y + room.depth / 2;
+  const totalRun = run * steps;
+  const baseOffset = -totalRun / 2 + run / 2;
+  const rotationY = alongZ ? 0 : Math.PI / 2;
+  const color = selected ? "#EF7545" : "#D8BE82";
+  const railLength = totalRun + 0.3;
+  const railOffset = stairWidth / 2 + 0.28;
+
+  return <group position={[startX, y + 0.22, startZ]} rotation={[0, rotationY, 0]} onClick={event => { event.stopPropagation(); onSelect(room.id); }}>
+    {Array.from({ length: steps }, (_, index) => {
+      const height = 0.18 + index * 0.22;
+      const z = baseOffset + index * run;
+      return <mesh key={`${room.id}-step-${index}`} position={[0, height / 2, z]} castShadow receiveShadow>
+        <boxGeometry args={[stairWidth, height, run * 0.92]} />
+        <meshStandardMaterial color={color} roughness={0.68} />
+      </mesh>;
+    })}
+    <mesh position={[0, 1.65, totalRun / 2 - run * 0.8]} castShadow receiveShadow>
+      <boxGeometry args={[stairWidth + 0.35, 0.16, run * 1.35]} />
+      <meshStandardMaterial color={selected ? "#EF7545" : "#BCA26A"} roughness={0.7} />
+    </mesh>
+    {[-railOffset, railOffset].map((x, index) => <group key={`${room.id}-rail-${index}`} position={[x, 1.15, 0]}>
+      <mesh castShadow receiveShadow>
+        <boxGeometry args={[0.08, 0.12, railLength]} />
+        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+      </mesh>
+      <mesh position={[0, -0.55, -railLength / 2 + 0.25]} castShadow>
+        <boxGeometry args={[0.09, 1.1, 0.09]} />
+        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+      </mesh>
+      <mesh position={[0, -0.35, railLength / 2 - 0.25]} castShadow>
+        <boxGeometry args={[0.09, 1.5, 0.09]} />
+        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+      </mesh>
+    </group>)}
+    <Text position={[0, 0.08, -totalRun / 2 - 0.8]} rotation={[-Math.PI / 2, 0, 0]} fontSize={0.42} color="#5B4931" anchorX="center" anchorY="middle">UP</Text>
+    <mesh position={[0, 0.1, -totalRun / 2 - 0.15]} rotation={[0, 0, Math.PI / 4]} receiveShadow>
+      <boxGeometry args={[0.55, 0.05, 0.12]} />
+      <meshStandardMaterial color="#5B4931" roughness={0.5} />
+    </mesh>
+  </group>;
+}
+
 function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean }) {
   const y = plan.elevation; const h = 9; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
   const visible = activeFloor === -1 || activeFloor === plan.level;
@@ -142,6 +191,7 @@ function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selected
     </mesh>
     {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9} /></mesh>}
     {interiors && <Furniture room={room} y={y} color={material.accent} />}
+    {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selectedId === room.id} onSelect={onSelect} />}
     <Text position={[cx, y + .08, cz]} rotation={[-Math.PI/2, 0, 0]} fontSize={.24} color="#3E4D45" anchorX="center" anchorY="middle">{room.name}</Text>
   </group>;
 }
