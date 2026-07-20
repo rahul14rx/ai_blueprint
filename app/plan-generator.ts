@@ -1,5 +1,5 @@
-import { Brief, FloorPlan, Opening, Project, ROOM_COLORS, Room, RoomType, PRESETS } from "./studio-types";
-import { optimizeGroundFloor } from "./layout-optimizer";
+import { Brief, FloorPlan, GenerationTrace, Opening, Project, ROOM_COLORS, Room, RoomType, PRESETS } from "./studio-types";
+import { evaluateGroundFloorCandidates } from "./layout-optimizer";
 import { needsWetVentilation, removeNegatedFeatures, requestedOptionalFeaturesFromText, roomMeetsMinimum, wantsAttachedBath } from "./layout-rules";
 import { evaluateArchitecture } from "./architecture-validator";
 
@@ -121,10 +121,21 @@ export function parseBrief(prompt: string, form: Partial<Brief>): Brief {
 }
 
 export function generatePlans(brief: Brief): FloorPlan[] {
+  return generatePlansWithTrace(brief).plans;
+}
+
+function generatePlansWithTrace(brief: Brief): { plans: FloorPlan[]; generationTrace?: GenerationTrace } {
   const W = brief.plotWidth, D = brief.plotDepth;
-  return Array.from({ length: brief.floors }, (_, level) => level === 0 && W >= feet(brief, 24) && D >= feet(brief, 32)
-    ? generateArchitecturalGroundFloor(brief, level)
-    : generateFallbackFloor(brief, level));
+  let generationTrace: GenerationTrace | undefined;
+  const plans = Array.from({ length: brief.floors }, (_, level) => {
+    if (level === 0 && W >= feet(brief, 24) && D >= feet(brief, 32)) {
+      const result = generateArchitecturalGroundFloorResult(brief, level);
+      generationTrace = result.trace;
+      return result.plan;
+    }
+    return generateFallbackFloor(brief, level);
+  });
+  return { plans, generationTrace };
 }
 
 function generateFallbackFloor(brief: Brief, level: number): FloorPlan {
@@ -161,26 +172,224 @@ function roomSpecs(brief: Brief): { name: string; type: RoomType }[] {
   return specs.length ? specs : [{ name: "Open room", type: "living" }];
 }
 
-function generateArchitecturalGroundFloor(brief: Brief, level: number): FloorPlan {
-  const optimized = optimizeGroundFloor(brief, level);
+type PlanCandidate = { label: string; source: "baseline" | "experimental"; plan: FloorPlan };
+
+function generateArchitecturalGroundFloorResult(brief: Brief, level: number): { plan: FloorPlan; trace: GenerationTrace } {
+  const optimizedLayouts = evaluateGroundFloorCandidates(brief, level);
   const roadSide = brief.roadSide !== "unspecified" ? brief.roadSide : brief.facing;
-  const candidates: FloorPlan[] = [];
-  if (optimized) candidates.push(makeFloorPlan(brief, level, optimized.rooms));
+  const candidates: PlanCandidate[] = [];
+  optimizedLayouts.forEach((layout, index) => candidates.push({
+    label: `${index === 0 ? "Optimizer primary" : "Optimizer alternate"}: ${layout.strategy}`,
+    source: index === 0 ? "baseline" : "experimental",
+    plan: makeFloorPlan(brief, level, layout.rooms),
+  }));
   if ((roadSide === "north" || roadSide === "south") && brief.bedrooms === 3 && !brief.features.includes("garage") && brief.plotWidth >= feet(brief, 24) && brief.plotDepth >= feet(brief, 38)) {
-    candidates.push(makeCompactThreeBedroomPlan(brief, level, roadSide));
+    candidates.push({ label: "Experimental: compact 3-bedroom public split", source: "experimental", plan: makeCompactThreeBedroomPlan(brief, level, roadSide) });
   }
   if ((roadSide === "north" || roadSide === "south") && brief.bedrooms === 2 && !brief.features.includes("garage") && brief.plotWidth >= feet(brief, 24) && brief.plotDepth >= feet(brief, 32)) {
-    candidates.push(makeCompactTwoBedroomOpenPlan(brief, level, roadSide));
+    candidates.push({ label: "Experimental: compact 2-bedroom open plan", source: "experimental", plan: makeCompactTwoBedroomOpenPlan(brief, level, roadSide) });
   }
-  candidates.push(roadSide === "north" || roadSide === "south"
-    ? makeNorthSouthPlan(brief, level, roadSide)
-    : makeEastWestPlan(brief, level, roadSide === "west" ? "west" : "east"));
+  candidates.push({
+    label: roadSide === "north" || roadSide === "south" ? "Legacy generator: north-south heuristic" : "Legacy generator: east-west heuristic",
+    source: "experimental",
+    plan: roadSide === "north" || roadSide === "south"
+      ? makeNorthSouthPlan(brief, level, roadSide)
+      : makeEastWestPlan(brief, level, roadSide === "west" ? "west" : "east"),
+  });
+  const repairCandidates = candidates.flatMap(candidate => makeServiceAccessRepairCandidates(brief, level, candidate));
+  candidates.push(...repairCandidates);
 
-  return candidates.find(plan => finalPlanErrors(brief, plan).length === 0) ?? candidates[0];
+  const fallback = candidates[0] ?? { label: "Fallback grid generator", source: "baseline" as const, plan: generateFallbackFloor(brief, level) };
+  const baseline = candidates.find(candidate => finalPlanErrors(brief, candidate.plan).length === 0) ?? fallback;
+  return selectBestGroundFloorCandidate(brief, baseline, candidates.filter(candidate => candidate !== baseline));
 }
 
 export function finalPlanErrors(brief: Brief, plan: FloorPlan) {
   return [...validatePlans([plan]), ...evaluateArchitecture(brief, plan).errors];
+}
+
+function planChoiceScore(brief: Brief, plan: FloorPlan) {
+  const geometryErrors = validatePlans([plan]);
+  const architecture = evaluateArchitecture(brief, plan);
+  const errors = [...new Set([...geometryErrors, ...architecture.errors])];
+  return {
+    plan,
+    errors,
+    score: architecture.score - errors.length * 100 - architecture.warnings.length * 4,
+  };
+}
+
+function makeServiceAccessRepairCandidates(brief: Brief, level: number, candidate: PlanCandidate): PlanCandidate[] {
+  const beforeErrors = finalPlanErrors(brief, candidate.plan);
+  const serviceRooms = candidate.plan.rooms.filter(room =>
+    ["utility", "laundry", "pantry"].includes(room.type) &&
+    beforeErrors.some(error => error.startsWith(`${room.name} is not clearly reachable`) || error.startsWith(`${room.name} has no usable door`))
+  );
+  if (!serviceRooms.length) return [];
+
+  const repairedRooms = candidate.plan.rooms.map(item => ({ ...item }));
+  let changed = false;
+  serviceRooms.forEach(serviceRoom => {
+    const index = repairedRooms.findIndex(item => item.id === serviceRoom.id);
+    if (index < 0) return;
+    const placed = findAccessibleServicePlacement(brief, candidate.plan, repairedRooms.filter(item => item.id !== serviceRoom.id), repairedRooms[index]);
+    if (!placed) return;
+    repairedRooms[index] = placed;
+    changed = true;
+  });
+  if (!changed) return [];
+
+  const repairedPlan = makeFloorPlan(brief, level, repairedRooms);
+  const afterErrors = finalPlanErrors(brief, repairedPlan);
+  if (afterErrors.length >= beforeErrors.length) return [];
+  return [{
+    label: `Repair: service access for ${candidate.label}`,
+    source: "experimental",
+    plan: repairedPlan,
+  }];
+}
+
+function findAccessibleServicePlacement(brief: Brief, plan: FloorPlan, fixedRooms: Room[], serviceRoom: Room) {
+  const accessTargets = fixedRooms.filter(room => {
+    if (serviceRoom.type === "pantry") return room.type === "kitchen" || isAccessRoom(room);
+    return room.type === "kitchen" || room.type === "bathroom" || isAccessRoom(room);
+  });
+  const sizes = uniqueSizes([
+    { width: serviceRoom.width, depth: serviceRoom.depth },
+    { width: serviceRoom.depth, depth: serviceRoom.width },
+    {
+      width: Math.max(serviceRoom.width, feet(brief, serviceRoom.type === "pantry" ? 5 : 6)),
+      depth: Math.max(serviceRoom.depth, feet(brief, serviceRoom.type === "pantry" ? 5 : 6)),
+    },
+  ]);
+
+  return accessTargets.flatMap(targetRoom => servicePlacementAttempts(plan, fixedRooms, serviceRoom, targetRoom, sizes)
+    .map(placed => ({
+      placed,
+      score: servicePlacementScore(plan, serviceRoom, targetRoom, placed),
+    })))
+    .sort((a, b) => b.score - a.score)[0]?.placed ?? null;
+}
+
+function uniqueSizes(sizes: { width: number; depth: number }[]) {
+  const seen = new Set<string>();
+  return sizes.filter(size => {
+    const key = `${size.width.toFixed(2)}x${size.depth.toFixed(2)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return size.width > 0 && size.depth > 0;
+  });
+}
+
+function servicePlacementAttempts(plan: FloorPlan, fixedRooms: Room[], serviceRoom: Room, targetRoom: Room, sizes: { width: number; depth: number }[]) {
+  const attempts: Room[] = [];
+  sizes.forEach(size => {
+    const verticalY = uniqueNumbers([
+      targetRoom.y,
+      targetRoom.y + targetRoom.depth - size.depth,
+      targetRoom.y + targetRoom.depth / 2 - size.depth / 2,
+    ]).map(value => clamp(value, 0, plan.depth - size.depth));
+    const horizontalX = uniqueNumbers([
+      targetRoom.x,
+      targetRoom.x + targetRoom.width - size.width,
+      targetRoom.x + targetRoom.width / 2 - size.width / 2,
+    ]).map(value => clamp(value, 0, plan.width - size.width));
+
+    verticalY.forEach(y => {
+      attempts.push({ ...serviceRoom, x: targetRoom.x - size.width, y, width: size.width, depth: size.depth });
+      attempts.push({ ...serviceRoom, x: targetRoom.x + targetRoom.width, y, width: size.width, depth: size.depth });
+    });
+    horizontalX.forEach(x => {
+      attempts.push({ ...serviceRoom, x, y: targetRoom.y - size.depth, width: size.width, depth: size.depth });
+      attempts.push({ ...serviceRoom, x, y: targetRoom.y + targetRoom.depth, width: size.width, depth: size.depth });
+    });
+  });
+
+  return attempts.filter(attempt =>
+    roomInsidePlan(attempt, plan) &&
+    !fixedRooms.some(other => roomsOverlap(attempt, other)) &&
+    !!sharedWall(attempt, targetRoom)
+  );
+}
+
+function servicePlacementScore(plan: FloorPlan, original: Room, targetRoom: Room, placed: Room) {
+  const targetScore = targetRoom.type === "kitchen" ? 80 : isAccessRoom(targetRoom) ? 65 : 45;
+  const exteriorScore = exteriorWall(placed, plan) ? 3 : 0;
+  const distancePenalty = Math.abs(original.x - placed.x) + Math.abs(original.y - placed.y);
+  return targetScore - distancePenalty * 0.05 + exteriorScore;
+}
+
+function roomInsidePlan(item: Room, plan: FloorPlan) {
+  return item.x >= -0.01 && item.y >= -0.01 && item.x + item.width <= plan.width + 0.01 && item.y + item.depth <= plan.depth + 0.01;
+}
+
+function roomsOverlap(a: Room, b: Room) {
+  return a.x < b.x + b.width - 0.02 && a.x + a.width > b.x + 0.02 && a.y < b.y + b.depth - 0.02 && a.y + a.depth > b.y + 0.02;
+}
+
+function uniqueNumbers(values: number[]) {
+  const seen = new Set<string>();
+  return values.filter(value => {
+    const key = value.toFixed(2);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return Number.isFinite(value);
+  });
+}
+
+export function selectBestGroundFloorPlan(brief: Brief, baseline: FloorPlan, alternatives: FloorPlan[]) {
+  return selectBestGroundFloorCandidate(
+    brief,
+    { label: "Baseline", source: "baseline", plan: baseline },
+    alternatives.map((plan, index) => ({ label: `Alternative ${index + 1}`, source: "experimental", plan })),
+  ).plan;
+}
+
+function selectBestGroundFloorCandidate(brief: Brief, baseline: PlanCandidate, alternatives: PlanCandidate[]): { plan: FloorPlan; trace: GenerationTrace } {
+  const baselineChoice = planChoiceScore(brief, baseline.plan);
+  const choices = alternatives.map(candidate => ({ candidate, ...planChoiceScore(brief, candidate.plan) }));
+  const validChoices = choices.filter(choice => choice.errors.length === 0);
+  let selected = baseline;
+
+  if (baselineChoice.errors.length === 0) {
+    const better = validChoices
+      .filter(choice => choice.score >= baselineChoice.score + 6)
+      .sort((a, b) => b.score - a.score)[0];
+    selected = better?.candidate ?? baseline;
+  } else {
+    const valid = validChoices.sort((a, b) => b.score - a.score)[0];
+    selected = valid?.candidate ?? choices
+      .filter(choice => choice.errors.length < baselineChoice.errors.length || (choice.errors.length === baselineChoice.errors.length && choice.score > baselineChoice.score))
+      .sort((a, b) => a.errors.length - b.errors.length || b.score - a.score)[0]?.candidate ?? baseline;
+  }
+
+  const allTraceChoices = [
+    { candidate: baseline, ...baselineChoice },
+    ...choices,
+  ];
+  const trace: GenerationTrace = {
+    selectedLabel: selected.label,
+    candidates: allTraceChoices.map(choice => ({
+      label: choice.candidate.label,
+      source: choice.candidate.source,
+      score: choice.score,
+      valid: choice.errors.length === 0,
+      selected: choice.candidate === selected,
+      errors: choice.errors.slice(0, 4),
+      warnings: evaluateArchitecture(brief, choice.candidate.plan).warnings.slice(0, 4),
+    })),
+  };
+
+  logGenerationTrace(brief, trace);
+  return { plan: selected.plan, trace };
+}
+
+function logGenerationTrace(brief: Brief, trace: GenerationTrace) {
+  if (typeof window !== "undefined") return;
+  console.info(`[layout-engine] ${brief.plotWidth}x${brief.plotDepth} ${brief.roadSide}-road selected: ${trace.selectedLabel}`);
+  trace.candidates.forEach(candidate => {
+    console.info(`[layout-engine] ${candidate.selected ? "WIN" : candidate.valid ? "OK " : "BAD"} score=${candidate.score} ${candidate.label}${candidate.errors.length ? ` | ${candidate.errors.join(" ")}` : ""}`);
+  });
 }
 
 function makeCompactTwoBedroomOpenPlan(brief: Brief, level: number, roadSide: "north" | "south"): FloorPlan {
@@ -713,6 +922,6 @@ export function validatePlans(plans: FloorPlan[]): string[] {
 }
 
 export function createProject(brief: Brief): Project {
-  const plans = generatePlans(brief); const base = PRESETS[brief.style] || PRESETS.Modern;
-  return { id: uid(), version: 1, state: "plan_editing", brief, plans, materials: Object.fromEntries(plans.flatMap(p => p.rooms.map(r => [r.id, { ...base }]))), updatedAt: new Date().toISOString() };
+  const { plans, generationTrace } = generatePlansWithTrace(brief); const base = PRESETS[brief.style] || PRESETS.Modern;
+  return { id: uid(), version: 1, state: "plan_editing", brief, plans, materials: Object.fromEntries(plans.flatMap(p => p.rooms.map(r => [r.id, { ...base }]))), updatedAt: new Date().toISOString(), generationTrace };
 }

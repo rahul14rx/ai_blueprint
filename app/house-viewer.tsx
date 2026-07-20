@@ -1,6 +1,6 @@
 "use client";
 import { Canvas } from "@react-three/fiber";
-import { Environment, FirstPersonControls, Grid, OrbitControls, Text } from "@react-three/drei";
+import { Billboard, Environment, FirstPersonControls, Grid, OrbitControls, Text } from "@react-three/drei";
 import { Suspense } from "react";
 import { FloorPlan, MaterialSet, Room } from "./studio-types";
 import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
@@ -180,19 +180,45 @@ function Staircase({ room, y, selected, onSelect }: { room: Room; y: number; sel
   </group>;
 }
 
+function RoomLabel({ room, y, selected, onSelect }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void }) {
+  const cx = room.x + room.width / 2;
+  const cz = room.y + room.depth / 2;
+  const smallestSide = Math.min(room.width, room.depth);
+  const fontSize = Math.max(0.38, Math.min(0.74, smallestSide * 0.07));
+  const maxWidth = Math.max(2.4, Math.min(room.width, room.depth) * 0.86);
+
+  return <Billboard position={[cx, y + 9.75, cz]} follow lockX={false} lockY={false} lockZ={false}>
+    <Text
+      fontSize={fontSize}
+      maxWidth={maxWidth}
+      lineHeight={0.92}
+      textAlign="center"
+      color={selected ? "#EF7545" : "#17352B"}
+      outlineColor="#FFFDF4"
+      outlineWidth={0.045}
+      anchorX="center"
+      anchorY="middle"
+      onClick={event => { event.stopPropagation(); onSelect(room.id); }}
+    >
+      {room.name.toUpperCase()}
+    </Text>
+  </Billboard>;
+}
+
 function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean }) {
   const y = plan.elevation; const h = 9; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
   const visible = activeFloor === -1 || activeFloor === plan.level;
+  const selected = selectedId === room.id;
   if (!visible) return null;
   return <group>
     <mesh position={[cx, y + .105, cz]} receiveShadow onClick={e => { e.stopPropagation(); onSelect(room.id); }}>
       <boxGeometry args={[room.width - .18, .026, room.depth - .18]} />
-      <meshStandardMaterial color={selectedId === room.id ? "#F2A17D" : room.color} transparent opacity={selectedId === room.id ? 0.82 : 0.34} roughness={.82} />
+      <meshStandardMaterial color={selected ? "#F2A17D" : room.color} transparent opacity={selected ? 0.82 : 0.34} roughness={.82} />
     </mesh>
     {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9} /></mesh>}
     {interiors && <Furniture room={room} y={y} color={material.accent} />}
-    {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selectedId === room.id} onSelect={onSelect} />}
-    <Text position={[cx, y + .08, cz]} rotation={[-Math.PI/2, 0, 0]} fontSize={.24} color="#3E4D45" anchorX="center" anchorY="middle">{room.name}</Text>
+    {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selected} onSelect={onSelect} />}
+    <RoomLabel room={room} y={y} selected={selected} onSelect={onSelect} />
   </group>;
 }
 

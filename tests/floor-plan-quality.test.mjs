@@ -11,7 +11,7 @@ after(async () => {
   await vite.close();
 });
 
-const { createProject, finalPlanErrors, parseBrief, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
+const { createProject, finalPlanErrors, parseBrief, selectBestGroundFloorPlan, validatePlans } = await vite.ssrLoadModule("/app/plan-generator.ts");
 const { evaluateArchitecture } = await vite.ssrLoadModule("/app/architecture-validator.ts");
 const { evaluateBriefFeasibility } = await vite.ssrLoadModule("/app/layout-feasibility.ts");
 const { normalizeParsedRequirements } = await vite.ssrLoadModule("/app/requirement-normalizer.ts");
@@ -930,6 +930,58 @@ test("generated main entry continues into the circulation network", () => {
     const targets = doorTargets(plan, entry.room);
     assert.ok(targets.some(target => target.type === "hallway" || target.type === "foyer" || target.name.toLowerCase().includes("lobby") || target.name.toLowerCase().includes("passage")), `${entry.room.name} should continue into circulation`);
   }
+});
+
+test("engine trace records repaired service-access candidates", () => {
+  const project = createProject(makeBrief({
+    prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, living room, kitchen beside dining room, one-car garage, internal staircase and utility room. The road is on the east side.",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: ["kitchen beside dining room"],
+  }));
+  const repaired = project.generationTrace?.candidates.find(candidate => /Repair: service access/i.test(candidate.label));
+
+  assert.ok(repaired, "trace should expose an automatic repair attempt");
+  assert.equal(repaired.valid, true);
+});
+
+test("engine selector keeps a valid baseline when an experimental candidate is invalid", () => {
+  const brief = makeBrief({
+    prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, living room, kitchen beside dining room, one-car garage, internal staircase and utility room. The road is on the east side.",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: ["kitchen beside dining room"],
+  });
+  const baseline = createProject(brief).plans[0];
+  const invalid = {
+    ...baseline,
+    id: "invalid-experimental",
+    rooms: baseline.rooms.map((room, index) => index === 1 ? { ...room, x: baseline.rooms[0].x, y: baseline.rooms[0].y } : { ...room }),
+  };
+
+  const selected = selectBestGroundFloorPlan(brief, baseline, [invalid]);
+
+  assert.equal(selected.id, baseline.id);
+  assert.deepEqual(finalPlanErrors(brief, selected), []);
+});
+
+test("engine selector can promote a cleaner valid candidate over a weaker baseline", () => {
+  const brief = makeBrief({
+    prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, living room, kitchen beside dining room, one-car garage, internal staircase and utility room. The road is on the east side.",
+    features: ["garage", "internal_staircase", "utility"],
+    adjacency: ["kitchen beside dining room"],
+  });
+  const clean = createProject(brief).plans[0];
+  const removableWindow = clean.openings.find(opening => opening.kind === "window");
+  assert.ok(removableWindow, "fixture needs a removable window");
+  const weakerBaseline = {
+    ...clean,
+    id: "weaker-baseline",
+    openings: clean.openings.filter(opening => opening.id !== removableWindow.id),
+  };
+
+  const selected = selectBestGroundFloorPlan(brief, weakerBaseline, [clean]);
+
+  assert.equal(selected.id, clean.id);
+  assert.deepEqual(finalPlanErrors(brief, selected), []);
 });
 
 test("brief revision adds adjacency without erasing protected counts", () => {
