@@ -1,10 +1,105 @@
 "use client";
-import { Canvas } from "@react-three/fiber";
-import { Billboard, Environment, FirstPersonControls, Grid, OrbitControls, Text } from "@react-three/drei";
-import { Suspense } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Billboard, Environment, Grid, OrbitControls, PointerLockControls, Text } from "@react-three/drei";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { Vector3 } from "three";
 import { FloorPlan, MaterialSet, Room } from "./studio-types";
 import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
-import { getDoorLeafPlacement, getEntryPath, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
+import { getDoorLeafPlacement, getEntryPath, getMainEntryPlacement, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
+
+const WALK_EYE_HEIGHT = 5.5;
+
+function getWalkSpawn(plan: FloorPlan): { position: [number, number, number]; lookAt: [number, number, number] } {
+  const eyeY = plan.elevation + WALK_EYE_HEIGHT;
+  const toWorld = (lx: number, lz: number): [number, number, number] => [lx - plan.width / 2, eyeY, lz - plan.depth / 2];
+  const entry = getMainEntryPlacement(plan);
+
+  if (entry) {
+    const { room, opening } = entry;
+    const cx = room.x + room.width / 2;
+    const cz = room.y + room.depth / 2;
+    const inset = 2;
+    let lx = cx;
+    let lz = cz;
+    if (opening.wall === "north") lz = Math.min(room.y + room.depth - 1.2, room.y + inset);
+    else if (opening.wall === "south") lz = Math.max(room.y + 1.2, room.y + room.depth - inset);
+    else if (opening.wall === "west") lx = Math.min(room.x + room.width - 1.2, room.x + inset);
+    else lx = Math.max(room.x + 1.2, room.x + room.width - inset);
+
+    const lookLX = lx + (opening.wall === "west" ? 4 : opening.wall === "east" ? -4 : 0);
+    const lookLZ = lz + (opening.wall === "north" ? 4 : opening.wall === "south" ? -4 : 0);
+    return { position: toWorld(lx, lz), lookAt: toWorld(lookLX, lookLZ) };
+  }
+
+  const foyer = plan.rooms.find(room => room.type === "foyer" || room.type === "hallway" || room.type === "living");
+  const room = foyer ?? plan.rooms[0];
+  const lx = room ? room.x + room.width / 2 : plan.width / 2;
+  const lz = room ? room.y + room.depth / 2 : plan.depth / 2;
+  return { position: toWorld(lx, lz), lookAt: toWorld(lx + 2, lz + 2) };
+}
+
+function WalkMovement({ active, eyeY, speed = 10 }: { active: boolean; eyeY: number; speed?: number }) {
+  const keys = useRef({ forward: false, back: false, left: false, right: false });
+
+  useEffect(() => {
+    if (!active) return;
+    const movementKeys = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+    const setKey = (code: string, down: boolean) => {
+      if (code === "KeyW" || code === "ArrowUp") keys.current.forward = down;
+      if (code === "KeyS" || code === "ArrowDown") keys.current.back = down;
+      if (code === "KeyA" || code === "ArrowLeft") keys.current.left = down;
+      if (code === "KeyD" || code === "ArrowRight") keys.current.right = down;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!movementKeys.has(event.code)) return;
+      event.preventDefault();
+      setKey(event.code, true);
+    };
+    const onKeyUp = (event: KeyboardEvent) => setKey(event.code, false);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      keys.current = { forward: false, back: false, left: false, right: false };
+    };
+  }, [active]);
+
+  useFrame(({ camera }, delta) => {
+    if (!active) return;
+    const { forward: moveForward, back, left, right: moveRight } = keys.current;
+    const forward = new Vector3();
+    const right = new Vector3();
+    const up = new Vector3(0, 1, 0);
+    if (moveForward || back || left || moveRight) {
+      camera.getWorldDirection(forward);
+      forward.y = 0;
+      if (forward.lengthSq() > 0) forward.normalize();
+      right.crossVectors(forward, up).normalize();
+      const step = speed * delta;
+      if (moveForward) camera.position.addScaledVector(forward, step);
+      if (back) camera.position.addScaledVector(forward, -step);
+      if (left) camera.position.addScaledVector(right, -step);
+      if (moveRight) camera.position.addScaledVector(right, step);
+    }
+    camera.position.y = eyeY;
+  });
+
+  return null;
+}
+
+function WalkCameraRig({ plan, active }: { plan: FloorPlan; active: boolean }) {
+  const camera = useThree(state => state.camera);
+
+  useEffect(() => {
+    if (!active) return;
+    const spawn = getWalkSpawn(plan);
+    camera.position.set(...spawn.position);
+    camera.lookAt(...spawn.lookAt);
+  }, [active, plan, camera]);
+
+  return null;
+}
 
 function Wall({ position, size, color, id, selected, onSelect }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void }) {
   return <mesh position={position} castShadow receiveShadow onClick={e => { e.stopPropagation(); onSelect(id); }}>
@@ -104,7 +199,7 @@ function FloorSlab({ plan, material }: { plan: FloorPlan; material?: MaterialSet
   </group>;
 }
 
-function EntryWalkway({ plan }: { plan: FloorPlan }) {
+function EntryWalkway({ plan, showLabel }: { plan: FloorPlan; showLabel: boolean }) {
   const path = getEntryPath(plan);
   if (!path) return null;
 
@@ -118,16 +213,21 @@ function EntryWalkway({ plan }: { plan: FloorPlan }) {
       <boxGeometry args={[width, 0.1, depth]} />
       <meshStandardMaterial color="#C9BFA9" roughness={0.88} />
     </mesh>
-    <Text position={[x, plan.elevation + 0.19, z]} rotation={[-Math.PI / 2, 0, 0]} fontSize={0.45} color="#53695B" anchorX="center" anchorY="middle">ENTRY PATH</Text>
+    {showLabel && <Text position={[x, plan.elevation + 0.19, z]} rotation={[-Math.PI / 2, 0, 0]} fontSize={0.45} color="#53695B" anchorX="center" anchorY="middle">ENTRY PATH</Text>}
   </group>;
 }
 
 function Furniture({ room, y, color }: { room: Room; y: number; color: string }) {
-  if (room.type === "bathroom" || room.type === "stairs") return null;
-  const w = Math.min(room.width * .46, room.type === "living" ? 2.4 : 1.8); const d = Math.min(room.depth * .32, 1.1);
-  return <group position={[room.x + room.width / 2, y + .22, room.y + room.depth / 2]}>
-    <mesh castShadow><boxGeometry args={[w, .42, d]} /><meshStandardMaterial color={color} roughness={.55} /></mesh>
-    {room.type === "kitchen" && <mesh position={[0, .55, 0]} castShadow><boxGeometry args={[w * .75, .7, .42]} /><meshStandardMaterial color="#E9E4DA" /></mesh>}
+  if (room.type === "bathroom" || room.type === "stairs" || room.type === "hallway") return null;
+  // Units are feet — size furniture like real pieces so rooms don't look empty/congested.
+  const maxW = room.type === "living" || room.type === "dining" ? 9 : room.type === "bedroom" ? 7 : 6;
+  const maxD = room.type === "living" || room.type === "dining" ? 4.5 : room.type === "bedroom" ? 5.5 : 3.2;
+  const w = Math.min(room.width * 0.42, maxW);
+  const d = Math.min(room.depth * 0.3, maxD);
+  const height = room.type === "bedroom" ? 1.4 : 1.1;
+  return <group position={[room.x + room.width / 2, y + height / 2 + 0.08, room.y + room.depth / 2]}>
+    <mesh castShadow><boxGeometry args={[w, height, d]} /><meshStandardMaterial color={color} roughness={.55} /></mesh>
+    {room.type === "kitchen" && <mesh position={[0, 1.1, 0]} castShadow><boxGeometry args={[w * .75, 2.2, 1.4]} /><meshStandardMaterial color="#E9E4DA" /></mesh>}
   </group>;
 }
 
@@ -180,14 +280,17 @@ function Staircase({ room, y, selected, onSelect }: { room: Room; y: number; sel
   </group>;
 }
 
-function RoomLabel({ room, y, selected, onSelect }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void }) {
+function RoomLabel({ room, y, selected, onSelect, visible }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void; visible: boolean }) {
+  if (!visible) return null;
   const cx = room.x + room.width / 2;
   const cz = room.y + room.depth / 2;
   const smallestSide = Math.min(room.width, room.depth);
-  const fontSize = Math.max(0.38, Math.min(0.74, smallestSide * 0.07));
-  const maxWidth = Math.max(2.4, Math.min(room.width, room.depth) * 0.86);
+  // Skip labels in skinny corridors — they make the model look congested.
+  if (smallestSide < 6) return null;
+  const fontSize = Math.max(0.9, Math.min(1.8, smallestSide * 0.09));
+  const maxWidth = Math.max(5, Math.min(room.width, room.depth) * 0.8);
 
-  return <Billboard position={[cx, y + 9.75, cz]} follow lockX={false} lockY={false} lockZ={false}>
+  return <Billboard position={[cx, y + 10.2, cz]} follow lockX={false} lockY={false} lockZ={false}>
     <Text
       fontSize={fontSize}
       maxWidth={maxWidth}
@@ -195,7 +298,7 @@ function RoomLabel({ room, y, selected, onSelect }: { room: Room; y: number; sel
       textAlign="center"
       color={selected ? "#EF7545" : "#17352B"}
       outlineColor="#FFFDF4"
-      outlineWidth={0.045}
+      outlineWidth={0.08}
       anchorX="center"
       anchorY="middle"
       onClick={event => { event.stopPropagation(); onSelect(room.id); }}
@@ -205,7 +308,7 @@ function RoomLabel({ room, y, selected, onSelect }: { room: Room; y: number; sel
   </Billboard>;
 }
 
-function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean }) {
+function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors, showLabels }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean; showLabels: boolean }) {
   const y = plan.elevation; const h = 9; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
   const visible = activeFloor === -1 || activeFloor === plan.level;
   const selected = selectedId === room.id;
@@ -218,16 +321,33 @@ function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selected
     {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9} /></mesh>}
     {interiors && <Furniture room={room} y={y} color={material.accent} />}
     {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selected} onSelect={onSelect} />}
-    <RoomLabel room={room} y={y} selected={selected} onSelect={onSelect} />
+    <RoomLabel room={room} y={y} selected={selected} onSelect={onSelect} visible={showLabels} />
   </group>;
 }
 
 export default function HouseViewer({ plans, materials, selectedId, onSelect, activeFloor, showCeiling, cutaway, mode, interiors }: { plans: FloorPlan[]; materials: Record<string, MaterialSet>; selectedId?: string; onSelect: (id: string) => void; activeFloor: number; showCeiling: boolean; cutaway: boolean; mode: "orbit" | "walk"; interiors: boolean }) {
-  const width = plans[0]?.width || 14; const depth = plans[0]?.depth || 18;
-  return <div className="three-canvas">
-    <Canvas shadows camera={{ position: [width * 1.15, 12, depth * 1.2], fov: 42 }} onPointerMissed={() => onSelect("")}>
+  const plan = plans[0];
+  const width = plan?.width || 14;
+  const depth = plan?.depth || 18;
+  const span = Math.max(width, depth);
+  const walking = mode === "walk";
+  const eyeY = (plan?.elevation ?? 0) + WALK_EYE_HEIGHT;
+  // Frame closer and higher so the house fills the view instead of reading as a tiny congested diagram.
+  const cameraDistance = span * 0.72;
+  const cameraHeight = Math.max(28, span * 0.62);
+  const lightReach = span * 1.2;
+  const [walkLocked, setWalkLocked] = useState(false);
+
+  useEffect(() => {
+    if (walking) return;
+    document.exitPointerLock?.();
+  }, [walking]);
+
+  return <div className={`three-canvas${walking ? " walk-mode" : ""}`}>
+    {walking && <div className="walk-hint">{walkLocked ? "WASD to move · Esc to release mouse" : "Click canvas to look · WASD to move"}</div>}
+    <Canvas shadows camera={{ position: [cameraDistance, cameraHeight, cameraDistance], fov: walking ? 72 : 36 }} onPointerMissed={() => !walking && onSelect("")}>
       <color attach="background" args={["#DDE9D6"]} />
-      <ambientLight intensity={1.25} /><directionalLight position={[10, 18, 8]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />
+      <ambientLight intensity={1.25} /><directionalLight position={[lightReach * 0.6, lightReach, lightReach * 0.45]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />
       <Suspense fallback={null}>
         <GrassGround width={width} depth={depth} />
         <group position={[-width/2, 0, -depth/2]}>
@@ -239,8 +359,8 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
             const firstMaterial = materials[plan.rooms[0]?.id];
             return [
               <FloorSlab key={`${plan.id}-slab`} plan={plan} material={firstMaterial} />,
-              <EntryWalkway key={`${plan.id}-entry-path`} plan={plan} />,
-              ...plan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={plan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} />),
+              <EntryWalkway key={`${plan.id}-entry-path`} plan={plan} showLabel={!walking} />,
+              ...plan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={plan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} showLabels={!walking} />),
               ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={plan.elevation} selectedId={selectedId} onSelect={onSelect} />),
               ...getPlanOpeningPlacements(plan).map(placement => <OpeningMarker key={placement.opening.id} placement={placement} y={plan.elevation} selectedId={selectedId} onSelect={onSelect} />),
             ];
@@ -248,8 +368,18 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
         </group>
         <Environment preset="apartment" />
       </Suspense>
-      <Grid args={[80, 80]} cellSize={1} cellThickness={.25} cellColor="#89A177" sectionSize={5} sectionThickness={0.45} sectionColor="#68825E" fadeDistance={55} infiniteGrid />
-      {mode === "orbit" ? <OrbitControls makeDefault target={[0, 2.5, 0]} maxPolarAngle={Math.PI / 2.02} /> : <FirstPersonControls makeDefault movementSpeed={4} lookSpeed={.08} />}
+      {!walking && <Grid args={[Math.max(120, span * 3), Math.max(120, span * 3)]} cellSize={2} cellThickness={.25} cellColor="#89A177" sectionSize={10} sectionThickness={0.45} sectionColor="#68825E" fadeDistance={span * 2.5} infiniteGrid />}
+      {plan && walking && <>
+        <WalkCameraRig plan={plan} active={walking} />
+        <WalkMovement active={walking} eyeY={eyeY} />
+        <PointerLockControls
+          makeDefault
+          selector=".three-canvas.walk-mode canvas"
+          onLock={() => setWalkLocked(true)}
+          onUnlock={() => setWalkLocked(false)}
+        />
+      </>}
+      {mode === "orbit" && <OrbitControls makeDefault target={[0, 3, 0]} maxPolarAngle={Math.PI / 2.05} minDistance={span * 0.35} maxDistance={span * 1.8} />}
     </Canvas>
   </div>;
 }

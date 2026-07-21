@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeft, Box, Check, ChevronRight, Download, History, Home, Map, Plus, RotateCcw, Ruler, Sparkles, Trash2, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Box, Check, ChevronRight, Download, Footprints, History, Home, Map, Plus, RotateCcw, Ruler, Sparkles, Trash2, X } from "lucide-react";
 import { createProject, validatePlans } from "./plan-generator";
 import { evaluateArchitecture } from "./architecture-validator";
 import { evaluateBriefFeasibility } from "./layout-feasibility";
@@ -13,7 +13,7 @@ type RevisionResponse = { ok?: boolean; brief?: Brief; changeSummary?: string; w
 type TesterLoginResponse = { ok?: boolean; tester?: { id: string; username: string }; error?: string };
 type ProjectsResponse = { ok?: boolean; projects?: SavedProject[]; project?: SavedProject; error?: string };
 type PlanVersion = { id: string; label: string; summary: string; createdAt: string; source: "initial" | "revision" | "regenerate"; project: Project };
-type SavedProject = { id: string; name: string; houseType: "single" | "multi"; floors: 1 | 2 | 3; createdAt: string; updatedAt: string };
+type SavedProject = { id: string; name: string; houseType: "single" | "multi"; floors: 1 | 2 | 3; createdAt: string; updatedAt: string; prompt?: string; brief?: Brief | null; designProject?: Project | null; versionHistory?: PlanVersion[]; activeVersionId?: string; hasDesign?: boolean };
 
 function createPlanVersion(project: Project, number: number, summary: string, source: PlanVersion["source"]): PlanVersion {
   const snapshot = { ...project, version: number };
@@ -34,8 +34,10 @@ export default function StudioApp() {
   const [loginError, setLoginError] = useState(""); const [projectName, setProjectName] = useState(""); const [floorCount, setFloorCount] = useState<1|2|3>(1);
   const [savedProjects, setSavedProjects] = useState<SavedProject[]>([]); const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [projectsLoading, setProjectsLoading] = useState(false); const [projectError, setProjectError] = useState("");
+  const [activeSavedProjectId, setActiveSavedProjectId] = useState(""); const [designSaving, setDesignSaving] = useState(false); const [designSaveError, setDesignSaveError] = useState("");
   const [homeMode, setHomeMode] = useState<"single"|"multi"|null>(null);
   const [viewMode, setViewMode] = useState<"2d"|"3d">("2d");
+  const [cameraMode, setCameraMode] = useState<"orbit"|"walk">("orbit");
   const [versionHistory, setVersionHistory] = useState<PlanVersion[]>([]); const [activeVersionId, setActiveVersionId] = useState("");
   const [revisionText, setRevisionText] = useState(""); const [revisionLoading, setRevisionLoading] = useState(false);
   const [revisionFeedback, setRevisionFeedback] = useState<{ kind: "ok" | "error"; summary: string; details: string[] }>({ kind: "ok", summary: "", details: [] });
@@ -111,11 +113,45 @@ export default function StudioApp() {
       setProjectsLoading(false);
     }
   }
+  async function saveProjectDesignSnapshot(nextProject: Project, nextHistory: PlanVersion[], nextActiveVersionId: string, nextPrompt = prompt) {
+    if (!testerId || !activeSavedProjectId) return;
+    setDesignSaving(true); setDesignSaveError("");
+    try {
+      const response = await fetch("/api/projects", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          testerId,
+          projectId: activeSavedProjectId,
+          prompt: nextPrompt,
+          brief: nextProject.brief,
+          designProject: nextProject,
+          versionHistory: nextHistory,
+          activeVersionId: nextActiveVersionId,
+        }),
+      });
+      const data = await response.json() as ProjectsResponse;
+      if (!response.ok || !data.ok || !data.project) throw new Error(data.error || "Could not save project design.");
+      setSavedProjects(current => current.map(item => item.id === data.project!.id ? data.project! : item));
+    } catch (error) {
+      setDesignSaveError(error instanceof Error ? error.message : "Could not save project design.");
+    } finally {
+      setDesignSaving(false);
+    }
+  }
   function openSavedProject(item: SavedProject) {
-    setProjectName(item.name); setFloorCount(item.floors); setHomeMode(item.houseType); setProjectModalOpen(false);
+    setActiveSavedProjectId(item.id); setProjectName(item.name); setFloorCount(item.floors); setHomeMode(item.houseType); setProjectModalOpen(false);
     if (item.houseType === "multi") return;
-    setStage("prompt"); setBrief(null); setProject(null); setSelectedId(""); setViewMode("2d"); setApiError("");
-    setVersionHistory([]); setActiveVersionId(""); setRevisionText(""); setRevisionFeedback({ kind: "ok", summary: "", details: [] });
+    setApiError(""); setDesignSaveError(""); setSelectedId(""); setViewMode("2d"); setCameraMode("orbit"); setRevisionText("");
+    if (item.designProject) {
+      const restoredHistory = item.versionHistory?.length ? item.versionHistory : [createPlanVersion(item.designProject, item.designProject.version || 1, "Saved project design", "initial")];
+      const restoredActiveId = item.activeVersionId || restoredHistory[restoredHistory.length - 1]?.id || "";
+      setPrompt(item.prompt || item.designProject.brief.prompt || EXAMPLE); setBrief(item.brief ?? item.designProject.brief); setProject(item.designProject);
+      setVersionHistory(restoredHistory); setActiveVersionId(restoredActiveId); setRevisionFeedback({ kind: "ok", summary: "Loaded saved project design.", details: ["2D and 3D restored from this project."] }); setStage("plan");
+      return;
+    }
+    setStage("prompt"); setBrief(null); setProject(null);
+    setVersionHistory([]); setActiveVersionId(""); setRevisionFeedback({ kind: "ok", summary: "", details: [] });
   }
   async function deleteSavedProject(item: SavedProject) {
     if (typeof window !== "undefined" && !window.confirm(`Delete "${item.name}" permanently?`)) return;
@@ -125,6 +161,7 @@ export default function StudioApp() {
       const data = await response.json() as ProjectsResponse;
       if (!response.ok || !data.ok) throw new Error(data.error || "Could not delete project.");
       setSavedProjects(current => current.filter(project => project.id !== item.id));
+      if (activeSavedProjectId === item.id) setActiveSavedProjectId("");
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : "Could not delete project.");
     } finally {
@@ -146,16 +183,21 @@ export default function StudioApp() {
     const report = evaluateBriefFeasibility(brief);
     if (!report.canGenerate) return;
     const entry = createPlanVersion(createProject(brief), 1, "Initial generated plan", "initial");
-    setVersionHistory([entry]); setActiveVersionId(entry.id); setProject(entry.project); setSelectedId(""); setViewMode("2d"); setStage("plan");
+    const nextHistory = [entry];
+    setVersionHistory(nextHistory); setActiveVersionId(entry.id); setProject(entry.project); setSelectedId(""); setViewMode("2d"); setCameraMode("orbit"); setStage("plan");
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id);
   }
   function loadVersion(entry: PlanVersion) {
     setBrief(entry.project.brief); setProject(entry.project); setActiveVersionId(entry.id); setSelectedId(""); setRevisionText("");
     setRevisionFeedback({ kind: "ok", summary: `Loaded ${entry.label}.`, details: [entry.summary] });
+    void saveProjectDesignSnapshot(entry.project, versionHistory.length ? versionHistory : [entry], entry.id);
   }
   function regenerateVersion() {
     if (!project) return;
     const entry = createPlanVersion(createProject(project.brief), versionHistory.length + 1, "Regenerated layout from current requirements", "regenerate");
-    setVersionHistory(current => [...current, entry]); setActiveVersionId(entry.id); setProject(entry.project); setSelectedId(""); setViewMode("2d");
+    const nextHistory = [...versionHistory, entry];
+    setVersionHistory(nextHistory); setActiveVersionId(entry.id); setProject(entry.project); setSelectedId(""); setViewMode("2d"); setCameraMode("orbit");
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id);
   }
   function exportPlan() { const canvas=document.querySelector(".plan-canvas canvas") as HTMLCanvasElement|null; if(!canvas)return; const link=document.createElement("a"); link.download="custom-floor-plan.png"; link.href=canvas.toDataURL("image/png"); link.click(); }
   async function applyRevision() {
@@ -170,8 +212,10 @@ export default function StudioApp() {
       const nextErrors = [...validatePlans(nextProject.plans), ...nextArchitecture.errors];
       if (nextErrors.length) throw new Error(`Revision was not applied because it created ${nextErrors.length} geometry issue(s): ${nextErrors.slice(0, 2).join(" ")}`);
       const entry = createPlanVersion(nextProject, versionHistory.length + 1, data.changeSummary || "Revision applied", "revision");
-      setBrief(data.brief); setProject(entry.project); setVersionHistory(current => [...current, entry]); setActiveVersionId(entry.id); setSelectedId(""); setRevisionText("");
+      const nextHistory = [...versionHistory, entry];
+      setBrief(data.brief); setProject(entry.project); setVersionHistory(nextHistory); setActiveVersionId(entry.id); setSelectedId(""); setRevisionText("");
       setRevisionFeedback({ kind: "ok", summary: data.changeSummary || "Revision applied.", details: [...(data.changedFields?.length ? [`Updated: ${data.changedFields.join(", ")}`] : []), ...(data.warnings ?? [])] });
+      void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id);
     } catch (error) {
       setRevisionFeedback({ kind: "error", summary: error instanceof Error ? error.message : "Could not apply that revision safely.", details: ["Old plan was kept unchanged."] });
     } finally { setRevisionLoading(false); }
@@ -192,7 +236,7 @@ export default function StudioApp() {
       </div>
       {projectError&&<div className="api-error dashboard-error"><AlertTriangle/>{projectError}</div>}
       {projectsLoading&&<div className="project-loading">Syncing projects...</div>}
-      {savedProjects.length===0&&!projectsLoading?<div className="empty-projects"><span><Plus size={24}/></span><h2>Create your first project</h2><p>No projects yet. Start with a project name, then choose single floor or multi floor.</p><button className="primary-btn" onClick={openProjectModal}>Create project <ChevronRight size={16}/></button></div>:<div className="project-grid">{savedProjects.map(item=><article key={item.id} className="project-tile"><div><small>{item.houseType==="single"?"Single floor house":"Multi-storied house"}</small><h2>{item.name}</h2><p>{item.floors} {item.floors===1?"floor":"floors"} - created {new Date(item.createdAt).toLocaleDateString()}</p></div><div className="project-actions"><button className="secondary-btn" onClick={()=>openSavedProject(item)} disabled={item.houseType==="multi"}>{item.houseType==="multi"?"Coming next":"Open project"} <ChevronRight size={14}/></button><button className="delete-project-btn" onClick={()=>deleteSavedProject(item)} aria-label={`Delete ${item.name}`} disabled={projectsLoading}><Trash2 size={15}/></button></div>{item.houseType==="multi"&&<span className="project-note">Multi-floor engine will connect in the next step.</span>}</article>)}</div>}
+      {savedProjects.length===0&&!projectsLoading?<div className="empty-projects"><span><Plus size={24}/></span><h2>Create your first project</h2><p>No projects yet. Start with a project name, then choose single floor or multi floor.</p><button className="primary-btn" onClick={openProjectModal}>Create project <ChevronRight size={16}/></button></div>:<div className="project-grid">{savedProjects.map(item=><article key={item.id} className="project-tile"><div><small>{item.houseType==="single"?"Single floor house":"Multi-storied house"}</small><h2>{item.name}</h2><p>{item.floors} {item.floors===1?"floor":"floors"} - created {new Date(item.createdAt).toLocaleDateString()}</p></div><div className="project-actions"><button className="secondary-btn" onClick={()=>openSavedProject(item)} disabled={item.houseType==="multi"}>{item.houseType==="multi"?"Coming next":"Open project"} <ChevronRight size={14}/></button><button className="delete-project-btn" onClick={()=>deleteSavedProject(item)} aria-label={`Delete ${item.name}`} disabled={projectsLoading}><Trash2 size={15}/></button></div>{item.hasDesign&&<span className="project-note">Saved 2D / 3D design ready.</span>}{item.houseType==="multi"&&<span className="project-note">Multi-floor engine will connect in the next step.</span>}</article>)}</div>}
       {projectModalOpen&&<div className="project-modal-backdrop"><div className="project-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={()=>setProjectModalOpen(false)} aria-label="Close"><X size={17}/></button><span className="eyebrow"><Plus size={14}/> Create project</span><h2>New home design</h2><label>Project name<input value={projectName} onChange={e=>setProjectName(e.target.value)} placeholder="East-facing family house"/></label><div className="house-type-choice"><button className={floorCount===1?"active":""} onClick={()=>{ setFloorCount(1); setHomeMode("single"); }}><Home size={18}/><b>Single floor</b><small>Current stable flow</small></button><button className={floorCount>1?"active":""} onClick={()=>{ setFloorCount(2); setHomeMode("multi"); }}><Box size={18}/><b>Multi floor</b><small>Up to 3 floors</small></button></div>{homeMode==="multi"&&<div className="floor-choice-row modal-floor-row"><span>Floors</span>{([2,3] as const).map(count=><button key={count} className={floorCount===count?"active":""} onClick={()=>setFloorCount(count)}>{count} floors</button>)}</div>}<button className="primary-btn wide" onClick={createSavedProject} disabled={projectName.trim().length<2||projectsLoading}>{projectsLoading?"Creating...":"Create project"} <ChevronRight size={17}/></button></div></div>}
     </section>}
 
@@ -200,6 +244,6 @@ export default function StudioApp() {
 
     {stage==="review" && brief && <section className="review-screen"><div className="section-intro"><span className="eyebrow">AI extraction complete</span><h1>Confirm the requirements.</h1><p>The layout engine will use only these structured inputs.</p></div><div className="requirement-sheet"><div className="sheet-head"><div><small>PROJECT</small><h2>{brief.title}</h2></div><span>{brief.floors} {brief.floors===1?"floor":"floors"}</span></div><div className="requirement-grid"><article><small>PLOT</small><b>{brief.plotWidth} x {brief.plotDepth} {unitMark}</b><p>Facing {brief.facing}; road on the {brief.roadSide} side.</p></article><article><small>PRIVATE SPACES</small><b>{brief.bedrooms} bedrooms / {brief.bathrooms} bathrooms</b><p>Counts extracted directly from your prompt.</p></article><article><small>SHARED SPACES</small><b>{brief.livingRooms} living / {brief.kitchens} kitchen / {brief.diningRooms} dining</b><p>{brief.adjacency.length?brief.adjacency.join("; "):"No special adjacency rule supplied."}</p></article><article><small>FEATURES</small><b>{brief.features.length?brief.features.map(x=>x.replaceAll("_"," ")).join(" / "):"None specified"}</b><p>{brief.style} design direction.</p></article></div>{brief.warnings.length>0&&<div className="warning-list"><h3><AlertTriangle/> Review note</h3>{brief.warnings.map(w=><span key={w}>{w}</span>)}</div>}{feasibility&&feasibility.issues.length>0&&<div className="warning-list"><h3><AlertTriangle/> Feasibility check</h3>{feasibility.issues.map(issue=><span key={issue.message}>{issue.message}</span>)}</div>}<div className="constraint-list"><h3>Automatic geometry checks</h3>{["No overlapping rooms","Every room remains inside the plot","Doors remain attached to rooms","Dimensions use the selected unit",feasibility?.canGenerate?"Program fits the plot":"Program must fit before generation"].map(x=><span key={x}><Check/>{x}</span>)}</div></div><div className="stage-actions"><button className="secondary-btn" onClick={()=>setStage("prompt")}>Correct prompt</button><button className="primary-btn" onClick={generate} disabled={!!feasibility&&!feasibility.canGenerate}>{feasibility&&!feasibility.canGenerate?"Adjust prompt to fit plot":<>Generate structured 2D plan <ChevronRight size={17}/></>}</button></div></section>}
 
-    {stage==="plan" && project && <section className="plan-result"><aside className="plan-summary"><span className="eyebrow">Generated plan</span><h2>{project.brief.title}</h2><p>{project.brief.facing}-facing {project.brief.plotWidth} x {project.brief.plotDepth} {project.brief.unit}</p><div className="orientation-card"><b>N</b><span>ROAD - {project.brief.roadSide.toUpperCase()} SIDE</span><strong>&rarr;</strong></div><div className="validation-card"><div className={errors.length?"status error":"status valid"}>{errors.length?<AlertTriangle/>:<Check/>}<span><b>{errors.length?"Needs correction":"Architecture checked"}</b><small>{errors.length?`${errors.length} blocking issue(s)`:architecture?`Quality score ${architecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{errors.map(e=><p key={e}>{e}</p>)}{!errors.length&&architecture?.warnings.map(w=><p className="arch-warning" key={w}>{w}</p>)}</div>{project.generationTrace&&<div className="engine-trace-card"><h3><Ruler size={13}/> Engine trace</h3><p>Selected: <b>{project.generationTrace.selectedLabel}</b></p>{project.generationTrace.candidates.map(candidate=><article key={candidate.label} className={candidate.selected?"selected":candidate.valid?"valid":"error"}><div><b>{candidate.label}</b><small>{candidate.source} / score {candidate.score}</small></div><em>{candidate.selected?"WIN":candidate.valid?"OK":"FAIL"}</em>{candidate.errors.map(error=><span key={error}>{error}</span>)}{!candidate.errors.length&&candidate.warnings.slice(0,2).map(warning=><span key={warning}>{warning}</span>)}</article>)}</div>}{versionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{versionHistory.map(entry=><button key={entry.id} className={activeVersionId===entry.id?"active":""} onClick={()=>loadVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise this plan</h3><textarea value={revisionText} onChange={e=>setRevisionText(e.target.value)} rows={4} placeholder="Example: move kitchen closer to dining, make hallway wider, add porch near entry."/><button className="primary-btn wide" onClick={applyRevision} disabled={revisionLoading||revisionText.trim().length<5}>{revisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{revisionFeedback.summary&&<div className={revisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{revisionFeedback.summary}</b>{revisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{project.plans[0].rooms.map(r=><button key={r.id} className={selectedId===r.id?"active":""} onClick={()=>setSelectedId(r.id)}><i style={{background:r.color}}/><span>{r.name}</span><small>{r.width.toFixed(1)} x {r.depth.toFixed(1)}</small></button>)}</div><div className="next-phase preview-ready"><b>3D preview unlocked</b><span>Generated from this exact 2D room geometry.</span></div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Structured geometry / measurements in {project.brief.unit}</span><div><button onClick={()=>setStage("review")}><ArrowLeft/> Back</button><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button onClick={regenerateVersion}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={project.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}}/>:<div className="preview-canvas"><HouseViewer plans={project.plans} materials={project.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={false} cutaway={false} mode="orbit" interiors={true}/></div>}<div className="board-footer"><span>{viewMode==="2d"?"Concept floor plan - requires architect review before construction.":"Preview model - walls are generated from the approved 2D structure."}</span><button className="approve-btn" disabled={errors.length>0}><Check/> Mark 2D plan as approved</button></div></div></section>}
+    {stage==="plan" && project && <section className="plan-result"><aside className="plan-summary"><span className="eyebrow">Generated plan</span><h2>{project.brief.title}</h2><p>{project.brief.facing}-facing {project.brief.plotWidth} x {project.brief.plotDepth} {project.brief.unit}</p><div className="orientation-card"><b>N</b><span>ROAD - {project.brief.roadSide.toUpperCase()} SIDE</span><strong>&rarr;</strong></div><div className="validation-card"><div className={errors.length?"status error":"status valid"}>{errors.length?<AlertTriangle/>:<Check/>}<span><b>{errors.length?"Needs correction":"Architecture checked"}</b><small>{errors.length?`${errors.length} blocking issue(s)`:architecture?`Quality score ${architecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{errors.map(e=><p key={e}>{e}</p>)}{!errors.length&&architecture?.warnings.map(w=><p className="arch-warning" key={w}>{w}</p>)}</div>{(designSaving||designSaveError)&&<div className={designSaveError?"revision-feedback error":"revision-feedback"}><b>{designSaveError?"Project save failed":"Saving project design..."}</b>{designSaveError&&<span>{designSaveError}</span>}</div>}{project.generationTrace&&<div className="engine-trace-card"><h3><Ruler size={13}/> Engine trace</h3><p>Selected: <b>{project.generationTrace.selectedLabel}</b></p>{project.generationTrace.candidates.map(candidate=><article key={candidate.label} className={candidate.selected?"selected":candidate.valid?"valid":"error"}><div><b>{candidate.label}</b><small>{candidate.source} / score {candidate.score}</small></div><em>{candidate.selected?"WIN":candidate.valid?"OK":"FAIL"}</em>{candidate.errors.map(error=><span key={error}>{error}</span>)}{!candidate.errors.length&&candidate.warnings.slice(0,2).map(warning=><span key={warning}>{warning}</span>)}</article>)}</div>}{versionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{versionHistory.map(entry=><button key={entry.id} className={activeVersionId===entry.id?"active":""} onClick={()=>loadVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise this plan</h3><textarea value={revisionText} onChange={e=>setRevisionText(e.target.value)} rows={4} placeholder="Example: move kitchen closer to dining, make hallway wider, add porch near entry."/><button className="primary-btn wide" onClick={applyRevision} disabled={revisionLoading||revisionText.trim().length<5}>{revisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{revisionFeedback.summary&&<div className={revisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{revisionFeedback.summary}</b>{revisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{project.plans[0].rooms.map(r=><button key={r.id} className={selectedId===r.id?"active":""} onClick={()=>setSelectedId(r.id)}><i style={{background:r.color}}/><span>{r.name}</span><small>{r.width.toFixed(1)} x {r.depth.toFixed(1)}</small></button>)}</div><div className="next-phase preview-ready"><b>3D preview unlocked</b><span>Generated from this exact 2D room geometry.</span></div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Structured geometry / measurements in {project.brief.unit}</span><div><button onClick={()=>setStage("review")}><ArrowLeft/> Back</button><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}<button onClick={regenerateVersion}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={project.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}}/>:<div className="preview-canvas"><HouseViewer plans={project.plans} materials={project.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true}/></div>}<div className="board-footer"><span>{viewMode==="2d"?"Concept floor plan - requires architect review before construction.":"Preview model - walls are generated from the approved 2D structure."}</span><button className="approve-btn" disabled={errors.length>0}><Check/> Mark 2D plan as approved</button></div></div></section>}
   </main>;
 }

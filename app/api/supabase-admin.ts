@@ -1,3 +1,5 @@
+import type { Brief, Project } from "../studio-types";
+
 export type TesterRow = { id: string; username: string };
 export type ProjectRow = {
   id: string;
@@ -6,6 +8,11 @@ export type ProjectRow = {
   floor_count: 1 | 2 | 3;
   created_at: string;
   updated_at: string;
+  prompt?: string | null;
+  brief_json?: Brief | null;
+  design_project_json?: Project | null;
+  version_history_json?: unknown[] | null;
+  active_version_id?: string | null;
 };
 
 function supabaseBaseUrl() {

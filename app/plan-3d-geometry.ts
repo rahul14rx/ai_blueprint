@@ -36,8 +36,9 @@ const WINDOW_SILL = 3.2;
 const WINDOW_HEIGHT = 2.35;
 const VENT_SILL = 6.2;
 const VENT_HEIGHT = 1.1;
-const EXTERIOR_THICKNESS = 0.42;
-const INTERIOR_THICKNESS = 0.24;
+// Scene units are feet — use real wall thickness so the model doesn't look like a paper diagram.
+const EXTERIOR_THICKNESS = 0.75;
+const INTERIOR_THICKNESS = 0.45;
 const EPSILON = 0.03;
 
 const roundKey = (value: number) => value.toFixed(2);

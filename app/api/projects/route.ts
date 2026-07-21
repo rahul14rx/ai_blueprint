@@ -10,8 +10,17 @@ function mapProject(row: ProjectRow) {
     floors: row.floor_count,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    prompt: row.prompt ?? "",
+    brief: row.brief_json ?? null,
+    designProject: row.design_project_json ?? null,
+    versionHistory: row.version_history_json ?? [],
+    activeVersionId: row.active_version_id ?? "",
+    hasDesign: Boolean(row.design_project_json),
   };
 }
+
+const BASE_PROJECT_SELECT = "id,name,house_type,floor_count,created_at,updated_at";
+const DESIGN_PROJECT_SELECT = `${BASE_PROJECT_SELECT},prompt,brief_json,design_project_json,version_history_json,active_version_id`;
 
 export async function GET(request: Request) {
   try {
@@ -21,10 +30,14 @@ export async function GET(request: Request) {
 
     const query = new URLSearchParams({
       tester_id: `eq.${testerId}`,
-      select: "id,name,house_type,floor_count,created_at,updated_at",
+      select: DESIGN_PROJECT_SELECT,
       order: "updated_at.desc",
     });
-    const response = await supabaseAdminFetch(`projects?${query.toString()}`);
+    let response = await supabaseAdminFetch(`projects?${query.toString()}`);
+    if (!response.ok && response.status === 400) {
+      query.set("select", BASE_PROJECT_SELECT);
+      response = await supabaseAdminFetch(`projects?${query.toString()}`);
+    }
     if (!response.ok) throw new Error(await readSupabaseError(response));
     const rows = await response.json() as ProjectRow[];
     return Response.json({ ok: true, projects: rows.map(mapProject) });
@@ -80,5 +93,52 @@ export async function DELETE(request: Request) {
     return Response.json({ ok: true });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Could not delete project." }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    if (!supabaseConfigured()) return Response.json({ error: "Supabase is not configured." }, { status: 500 });
+    const body = await request.json() as {
+      testerId?: string;
+      projectId?: string;
+      prompt?: string;
+      brief?: unknown;
+      designProject?: unknown;
+      versionHistory?: unknown[];
+      activeVersionId?: string;
+    };
+    if (!body.testerId || !body.projectId || !body.designProject) {
+      return Response.json({ error: "testerId, projectId, and designProject are required." }, { status: 400 });
+    }
+
+    const query = new URLSearchParams({
+      id: `eq.${body.projectId}`,
+      tester_id: `eq.${body.testerId}`,
+      select: DESIGN_PROJECT_SELECT,
+    });
+    const response = await supabaseAdminFetch(`projects?${query.toString()}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        prompt: body.prompt ?? "",
+        brief_json: body.brief ?? null,
+        design_project_json: body.designProject,
+        version_history_json: body.versionHistory ?? [],
+        active_version_id: body.activeVersionId ?? "",
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (!response.ok) {
+      const message = await readSupabaseError(response);
+      if (message.toLowerCase().includes("column")) {
+        throw new Error(`${message}. Run the project design storage SQL before saving designs.`);
+      }
+      throw new Error(message);
+    }
+    const rows = await response.json() as ProjectRow[];
+    return Response.json({ ok: true, project: mapProject(rows[0]) });
+  } catch (error) {
+    return Response.json({ error: error instanceof Error ? error.message : "Could not save project design." }, { status: 500 });
   }
 }
