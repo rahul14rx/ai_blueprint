@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ArrowLeft, Box, Check, ChevronRight, Download, Footprints, History, Home, Map, Plus, RotateCcw, Ruler, Sparkles, Trash2, X } from "lucide-react";
 import { createProject, validatePlans } from "./plan-generator";
 import { evaluateArchitecture } from "./architecture-validator";
@@ -62,6 +62,9 @@ export default function StudioApp() {
   const [revisionText, setRevisionText] = useState(""); const [revisionLoading, setRevisionLoading] = useState(false);
   const [revisionFeedback, setRevisionFeedback] = useState<{ kind: "ok" | "error"; summary: string; details: string[] }>({ kind: "ok", summary: "", details: [] });
   const [stage, setStage] = useState<Stage>("login"); const [loading, setLoading] = useState(false); const [apiError, setApiError] = useState("");
+  // Defer interactive login UI until after mount so password-manager DOM injections don't break hydration.
+  const [clientReady, setClientReady] = useState(false);
+  useEffect(() => { setClientReady(true); }, []);
   const feasibility = useMemo(() => brief ? evaluateBriefFeasibility(brief) : null, [brief]);
   const architecture = useMemo(() => project ? evaluateArchitecture(project.brief, project.plans[0]) : null, [project]);
   const errors = useMemo(() => project ? [...validatePlans(project.plans), ...(architecture?.errors ?? [])] : [], [project, architecture]);
@@ -391,7 +394,7 @@ export default function StudioApp() {
     {stage!=="login"&&<button className="flow-back-btn" onClick={goBack}><ArrowLeft size={14}/> {backLabel}</button>}
     {stage!=="login"&&stage!=="project"&&stage!=="multiSetup"&&<nav className="simple-progress"><div className={stage!=="prompt"?"done":"active"}><span>{stage!=="prompt"?<Check/>:1}</span><b>Enter prompt</b></div><i/><div className={stage==="review"?"active":stage==="plan"?"done":""}><span>{stage==="plan"?<Check/>:2}</span><b>Verify requirements</b></div><i/><div className={stage==="plan"?"active":""}><span>3</span><b>Generate 2D / 3D plan</b></div></nav>}
 
-    {stage==="login"&&<section className="login-screen"><div className="login-card"><span className="eyebrow"><Sparkles size={14}/> Tester access</span><h1>Sign in to start designing.</h1><p>Use tester accounts for now. Real saved accounts will move to the database layer next.</p><label>Username<input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="tester1"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="1"/></label><div className="tester-list"><b>Available testers</b><span>tester1 / tester2 / tester3 / tester4 / tester5</span><small>Password: 1</small></div>{loginError&&<div className="api-error"><AlertTriangle/>{loginError}</div>}<button className="primary-btn wide" onClick={continueLogin} disabled={loginId.trim().length<2||password.length<1}>Continue <ChevronRight size={17}/></button></div></section>}
+    {stage==="login"&&<section className="login-screen"><div className="login-card"><span className="eyebrow"><Sparkles size={14}/> Tester access</span><h1>Sign in to start designing.</h1><p>Use tester accounts for now. Real saved accounts will move to the database layer next.</p>{clientReady?<><label>Username<input value={loginId} onChange={e=>setLoginId(e.target.value)} placeholder="tester1" name="username" autoComplete="username"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="1" name="password" autoComplete="current-password"/></label><div className="tester-list"><b>Available testers</b><span>tester1 / tester2 / tester3 / tester4 / tester5</span><small>Password: 1</small></div>{loginError&&<div className="api-error"><AlertTriangle/>{loginError}</div>}<button className="primary-btn wide" onClick={continueLogin} disabled={loginId.trim().length<2||password.length<1}>Continue <ChevronRight size={17}/></button></>:<div className="tester-list"><b>Loading sign-in...</b><span>Preparing tester access</span></div>}</div></section>}
 
     {stage==="project"&&<section className="project-dashboard">
       <div className="dashboard-head">
