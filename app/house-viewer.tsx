@@ -8,6 +8,7 @@ import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
 import { getDoorLeafPlacement, getEntryPath, getMainEntryPlacement, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
 
 const WALK_EYE_HEIGHT = 5.5;
+const ROOM_HEIGHT = 9;
 
 function getWalkSpawn(plan: FloorPlan): { position: [number, number, number]; lookAt: [number, number, number] } {
   const eyeY = plan.elevation + WALK_EYE_HEIGHT;
@@ -38,7 +39,32 @@ function getWalkSpawn(plan: FloorPlan): { position: [number, number, number]; lo
   return { position: toWorld(lx, lz), lookAt: toWorld(lx + 2, lz + 2) };
 }
 
-function WalkMovement({ active, eyeY, speed = 10 }: { active: boolean; eyeY: number; speed?: number }) {
+function getWalkTargetY(plans: FloorPlan[], width: number, depth: number, worldX: number, worldZ: number, currentY: number) {
+  const localX = worldX + width / 2;
+  const localZ = worldZ + depth / 2;
+  const orderedPlans = [...plans].sort((a, b) => a.elevation - b.elevation);
+
+  for (let index = 0; index < orderedPlans.length - 1; index += 1) {
+    const plan = orderedPlans[index];
+    const nextPlan = orderedPlans[index + 1];
+    const stairRoom = plan.rooms.find(room => room.type === "stairs");
+    if (!stairRoom) continue;
+    const insideStair = localX >= stairRoom.x && localX <= stairRoom.x + stairRoom.width && localZ >= stairRoom.y && localZ <= stairRoom.y + stairRoom.depth;
+    if (!insideStair) continue;
+    const alongZ = stairRoom.depth >= stairRoom.width;
+    const rawProgress = alongZ ? (localZ - stairRoom.y) / stairRoom.depth : (localX - stairRoom.x) / stairRoom.width;
+    const progress = Math.max(0, Math.min(1, rawProgress));
+    return plan.elevation + WALK_EYE_HEIGHT + progress * (nextPlan.elevation - plan.elevation);
+  }
+
+  return orderedPlans.reduce((nearest, candidate) => {
+    const nearestDistance = Math.abs(currentY - (nearest.elevation + WALK_EYE_HEIGHT));
+    const candidateDistance = Math.abs(currentY - (candidate.elevation + WALK_EYE_HEIGHT));
+    return candidateDistance < nearestDistance ? candidate : nearest;
+  }, orderedPlans[0]).elevation + WALK_EYE_HEIGHT;
+}
+
+function WalkMovement({ active, plans, width, depth, speed = 10 }: { active: boolean; plans: FloorPlan[]; width: number; depth: number; speed?: number }) {
   const keys = useRef({ forward: false, back: false, left: false, right: false });
 
   useEffect(() => {
@@ -82,7 +108,8 @@ function WalkMovement({ active, eyeY, speed = 10 }: { active: boolean; eyeY: num
       if (left) camera.position.addScaledVector(right, -step);
       if (moveRight) camera.position.addScaledVector(right, step);
     }
-    camera.position.y = eyeY;
+    const targetY = getWalkTargetY(plans, width, depth, camera.position.x, camera.position.z, camera.position.y);
+    camera.position.y += (targetY - camera.position.y) * Math.min(1, delta * 7);
   });
 
   return null;
@@ -101,9 +128,9 @@ function WalkCameraRig({ plan, active }: { plan: FloorPlan; active: boolean }) {
   return null;
 }
 
-function Wall({ position, size, color, id, selected, onSelect }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void }) {
-  return <mesh position={position} castShadow receiveShadow onClick={e => { e.stopPropagation(); onSelect(id); }}>
-    <boxGeometry args={size} /><meshStandardMaterial color={selected ? "#EF7545" : color} roughness={.72} />
+function Wall({ position, size, color, id, selected, onSelect, opacity = 1 }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void; opacity?: number }) {
+  return <mesh position={position} castShadow={opacity > 0.5} receiveShadow={opacity > 0.5} onClick={e => { e.stopPropagation(); onSelect(id); }}>
+    <boxGeometry args={size} /><meshStandardMaterial color={selected ? "#EF7545" : color} {...fadeProps(opacity)} roughness={.72} />
   </mesh>;
 }
 
@@ -115,7 +142,12 @@ function GrassGround({ width, depth }: { width: number; depth: number }) {
   </mesh>;
 }
 
-function SharedWall({ wall, y, selectedId, onSelect }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void }) {
+function fadeProps(opacity: number) {
+  const faded = opacity < 0.99;
+  return { transparent: faded, opacity, depthWrite: !faded };
+}
+
+function SharedWall({ wall, y, selectedId, onSelect, opacity = 1 }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void; opacity?: number }) {
   const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
   const position: [number, number, number] = wall.orientation === "horizontal"
     ? [(wall.x1 + wall.x2) / 2, y + wall.bottom + wall.height / 2, wall.z1]
@@ -125,10 +157,28 @@ function SharedWall({ wall, y, selectedId, onSelect }: { wall: WallSegment3D; y:
     : [wall.thickness, wall.height, length];
   const color = wall.kind === "exterior" ? "#F5F2EA" : "#FFFFFF";
 
-  return <Wall id={wall.id} selected={selectedId === wall.id} onSelect={onSelect} position={position} size={size} color={color} />;
+  return <Wall id={wall.id} selected={selectedId === wall.id} onSelect={onSelect} position={position} size={size} color={color} opacity={opacity} />;
 }
 
-function OpeningMarker({ placement, y, selectedId, onSelect }: { placement: OpeningPlacement; y: number; selectedId?: string; onSelect: (id: string) => void }) {
+function GhostFloorOutline({ walls, y }: { walls: WallSegment3D[]; y: number }) {
+  return <group>
+    {walls.map(wall => {
+      const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
+      const position: [number, number, number] = wall.orientation === "horizontal"
+        ? [(wall.x1 + wall.x2) / 2, y + 0.18, wall.z1]
+        : [wall.x1, y + 0.18, (wall.z1 + wall.z2) / 2];
+      const size: [number, number, number] = wall.orientation === "horizontal"
+        ? [length, 0.1, wall.thickness * 1.4]
+        : [wall.thickness * 1.4, 0.1, length];
+      return <mesh key={`ghost-${wall.id}`} position={position}>
+        <boxGeometry args={size} />
+        <meshStandardMaterial color={wall.kind === "exterior" ? "#2E4B3B" : "#7C8E7E"} transparent opacity={0.24} depthWrite={false} roughness={0.8} />
+      </mesh>;
+    })}
+  </group>;
+}
+
+function OpeningMarker({ placement, y, selectedId, onSelect, opacity = 1 }: { placement: OpeningPlacement; y: number; selectedId?: string; onSelect: (id: string) => void; opacity?: number }) {
   const { opening } = placement;
   const length = placement.end - placement.start;
   const horizontal = placement.orientation === "horizontal";
@@ -149,20 +199,20 @@ function OpeningMarker({ placement, y, selectedId, onSelect }: { placement: Open
     return <group onClick={event => { event.stopPropagation(); onSelect(id); }}>
       <mesh position={position} receiveShadow>
         <boxGeometry args={size} />
-        <meshStandardMaterial color={isSelected ? "#EF7545" : isPassage ? "#D7B08B" : "#C8643C"} roughness={0.62} />
+        <meshStandardMaterial color={isSelected ? "#EF7545" : isPassage ? "#D7B08B" : "#C8643C"} {...fadeProps(opacity)} roughness={0.62} />
       </mesh>
       {isGarage && <mesh position={horizontal ? [placement.center, y + doorHeight / 2, placement.coord] : [placement.coord, y + doorHeight / 2, placement.center]} castShadow receiveShadow>
         <boxGeometry args={horizontal ? [length, doorHeight, 0.18] : [0.18, doorHeight, length]} />
-        <meshStandardMaterial color={doorColor} roughness={0.72} />
+        <meshStandardMaterial color={doorColor} {...fadeProps(opacity)} roughness={0.72} />
       </mesh>}
       {!isGarage && !isPassage && <group position={[leaf.hingeX, y + doorHeight / 2, leaf.hingeZ]} rotation={[0, leaf.rotationY, 0]}>
         <mesh position={leaf.orientation === "horizontal" ? [leaf.length / 2, 0, 0] : [0, 0, leaf.length / 2]} castShadow receiveShadow>
           <boxGeometry args={leaf.orientation === "horizontal" ? [leaf.length, doorHeight, 0.16] : [0.16, doorHeight, leaf.length]} />
-          <meshStandardMaterial color={doorColor} roughness={0.58} />
+          <meshStandardMaterial color={doorColor} {...fadeProps(opacity)} roughness={0.58} />
         </mesh>
         <mesh position={leaf.orientation === "horizontal" ? [leaf.length * 0.82, 0.2, 0.12] : [0.12, 0.2, leaf.length * 0.82]} castShadow>
           <boxGeometry args={[0.16, 0.16, 0.16]} />
-          <meshStandardMaterial color="#2F312D" roughness={0.35} />
+          <meshStandardMaterial color="#2F312D" {...fadeProps(opacity)} roughness={0.35} />
         </mesh>
       </group>}
     </group>;
@@ -177,24 +227,24 @@ function OpeningMarker({ placement, y, selectedId, onSelect }: { placement: Open
 
   return <mesh position={position} onClick={event => { event.stopPropagation(); onSelect(id); }}>
     <boxGeometry args={size} />
-    <meshStandardMaterial color={isSelected ? "#7FC7DC" : "#A9D6DF"} transparent opacity={0.62} roughness={0.25} />
+    <meshStandardMaterial color={isSelected ? "#7FC7DC" : "#A9D6DF"} transparent opacity={0.62 * opacity} depthWrite={false} roughness={0.25} />
   </mesh>;
 }
 
-function FloorSlab({ plan, material }: { plan: FloorPlan; material?: MaterialSet }) {
+function FloorSlab({ plan, material, opacity = 1 }: { plan: FloorPlan; material?: MaterialSet; opacity?: number }) {
   const y = plan.elevation;
   const cx = plan.width / 2;
   const cz = plan.depth / 2;
   const floorColor = material?.floor ?? "#D5D0C6";
 
   return <group>
-    <mesh position={[cx, y - 0.04, cz]} receiveShadow>
+    <mesh position={[cx, y - 0.04, cz]} receiveShadow={opacity > 0.5}>
       <boxGeometry args={[plan.width + 0.5, 0.16, plan.depth + 0.5]} />
-      <meshStandardMaterial color="#BFB8A9" roughness={0.82} />
+      <meshStandardMaterial color="#BFB8A9" {...fadeProps(opacity)} roughness={0.82} />
     </mesh>
-    <mesh position={[cx, y + 0.055, cz]} receiveShadow>
+    <mesh position={[cx, y + 0.055, cz]} receiveShadow={opacity > 0.5}>
       <boxGeometry args={[plan.width, 0.045, plan.depth]} />
-      <meshStandardMaterial color={floorColor} roughness={0.78} />
+      <meshStandardMaterial color={floorColor} {...fadeProps(opacity)} roughness={0.78} />
     </mesh>
   </group>;
 }
@@ -217,7 +267,7 @@ function EntryWalkway({ plan, showLabel }: { plan: FloorPlan; showLabel: boolean
   </group>;
 }
 
-function Furniture({ room, y, color }: { room: Room; y: number; color: string }) {
+function Furniture({ room, y, color, opacity = 1 }: { room: Room; y: number; color: string; opacity?: number }) {
   if (room.type === "bathroom" || room.type === "stairs" || room.type === "hallway") return null;
   // Units are feet — size furniture like real pieces so rooms don't look empty/congested.
   const maxW = room.type === "living" || room.type === "dining" ? 9 : room.type === "bedroom" ? 7 : 6;
@@ -226,12 +276,12 @@ function Furniture({ room, y, color }: { room: Room; y: number; color: string })
   const d = Math.min(room.depth * 0.3, maxD);
   const height = room.type === "bedroom" ? 1.4 : 1.1;
   return <group position={[room.x + room.width / 2, y + height / 2 + 0.08, room.y + room.depth / 2]}>
-    <mesh castShadow><boxGeometry args={[w, height, d]} /><meshStandardMaterial color={color} roughness={.55} /></mesh>
-    {room.type === "kitchen" && <mesh position={[0, 1.1, 0]} castShadow><boxGeometry args={[w * .75, 2.2, 1.4]} /><meshStandardMaterial color="#E9E4DA" /></mesh>}
+    <mesh castShadow><boxGeometry args={[w, height, d]} /><meshStandardMaterial color={color} {...fadeProps(opacity)} roughness={.55} /></mesh>
+    {room.type === "kitchen" && <mesh position={[0, 1.1, 0]} castShadow><boxGeometry args={[w * .75, 2.2, 1.4]} /><meshStandardMaterial color="#E9E4DA" {...fadeProps(opacity)} /></mesh>}
   </group>;
 }
 
-function Staircase({ room, y, selected, onSelect }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void }) {
+function Staircase({ room, y, selected, onSelect, opacity = 1, rise = 3.2 }: { room: Room; y: number; selected: boolean; onSelect: (id: string) => void; opacity?: number; rise?: number }) {
   const alongZ = room.depth >= room.width;
   const steps = Math.max(7, Math.min(12, Math.floor((alongZ ? room.depth : room.width) / 1.05)));
   const run = Math.max(0.55, Math.min(1.05, (alongZ ? room.depth : room.width) * 0.74 / steps));
@@ -247,35 +297,35 @@ function Staircase({ room, y, selected, onSelect }: { room: Room; y: number; sel
 
   return <group position={[startX, y + 0.22, startZ]} rotation={[0, rotationY, 0]} onClick={event => { event.stopPropagation(); onSelect(room.id); }}>
     {Array.from({ length: steps }, (_, index) => {
-      const height = 0.18 + index * 0.22;
+      const stairHeight = Math.min(rise - 0.22, Math.max(0.18, (rise / steps) * (index + 1)));
       const z = baseOffset + index * run;
-      return <mesh key={`${room.id}-step-${index}`} position={[0, height / 2, z]} castShadow receiveShadow>
-        <boxGeometry args={[stairWidth, height, run * 0.92]} />
-        <meshStandardMaterial color={color} roughness={0.68} />
+      return <mesh key={`${room.id}-step-${index}`} position={[0, stairHeight / 2, z]} castShadow receiveShadow>
+        <boxGeometry args={[stairWidth, stairHeight, run * 0.92]} />
+        <meshStandardMaterial color={color} {...fadeProps(opacity)} roughness={0.68} />
       </mesh>;
     })}
-    <mesh position={[0, 1.65, totalRun / 2 - run * 0.8]} castShadow receiveShadow>
+    <mesh position={[0, rise - 0.06, totalRun / 2 - run * 0.8]} castShadow receiveShadow>
       <boxGeometry args={[stairWidth + 0.35, 0.16, run * 1.35]} />
-      <meshStandardMaterial color={selected ? "#EF7545" : "#BCA26A"} roughness={0.7} />
+      <meshStandardMaterial color={selected ? "#EF7545" : "#BCA26A"} {...fadeProps(opacity)} roughness={0.7} />
     </mesh>
     {[-railOffset, railOffset].map((x, index) => <group key={`${room.id}-rail-${index}`} position={[x, 1.15, 0]}>
       <mesh castShadow receiveShadow>
         <boxGeometry args={[0.08, 0.12, railLength]} />
-        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+        <meshStandardMaterial color="#6B5A3D" {...fadeProps(opacity)} roughness={0.55} />
       </mesh>
       <mesh position={[0, -0.55, -railLength / 2 + 0.25]} castShadow>
         <boxGeometry args={[0.09, 1.1, 0.09]} />
-        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+        <meshStandardMaterial color="#6B5A3D" {...fadeProps(opacity)} roughness={0.55} />
       </mesh>
       <mesh position={[0, -0.35, railLength / 2 - 0.25]} castShadow>
         <boxGeometry args={[0.09, 1.5, 0.09]} />
-        <meshStandardMaterial color="#6B5A3D" roughness={0.55} />
+        <meshStandardMaterial color="#6B5A3D" {...fadeProps(opacity)} roughness={0.55} />
       </mesh>
     </group>)}
     <Text position={[0, 0.08, -totalRun / 2 - 0.8]} rotation={[-Math.PI / 2, 0, 0]} fontSize={0.42} color="#5B4931" anchorX="center" anchorY="middle">UP</Text>
     <mesh position={[0, 0.1, -totalRun / 2 - 0.15]} rotation={[0, 0, Math.PI / 4]} receiveShadow>
       <boxGeometry args={[0.55, 0.05, 0.12]} />
-      <meshStandardMaterial color="#5B4931" roughness={0.5} />
+      <meshStandardMaterial color="#5B4931" {...fadeProps(opacity)} roughness={0.5} />
     </mesh>
   </group>;
 }
@@ -308,34 +358,36 @@ function RoomLabel({ room, y, selected, onSelect, visible }: { room: Room; y: nu
   </Billboard>;
 }
 
-function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors, showLabels }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean; showLabels: boolean }) {
-  const y = plan.elevation; const h = 9; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
+function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selectedId, onSelect, interiors, showLabels, opacity = 1, stairRise = 3.2 }: { room: Room; plan: FloorPlan; material: MaterialSet; activeFloor: number; showCeiling: boolean; selectedId?: string; onSelect: (id: string) => void; interiors: boolean; showLabels: boolean; opacity?: number; stairRise?: number }) {
+  const y = plan.elevation; const h = ROOM_HEIGHT; const cx = room.x + room.width / 2; const cz = room.y + room.depth / 2;
   const visible = activeFloor === -1 || activeFloor === plan.level;
   const selected = selectedId === room.id;
   if (!visible) return null;
   return <group>
     <mesh position={[cx, y + .105, cz]} receiveShadow onClick={e => { e.stopPropagation(); onSelect(room.id); }}>
       <boxGeometry args={[room.width - .18, .026, room.depth - .18]} />
-      <meshStandardMaterial color={selected ? "#F2A17D" : room.color} transparent opacity={selected ? 0.82 : 0.34} roughness={.82} />
+      <meshStandardMaterial color={selected ? "#F2A17D" : room.color} transparent opacity={(selected ? 0.82 : 0.34) * opacity} depthWrite={opacity >= 0.99} roughness={.82} />
     </mesh>
-    {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9} /></mesh>}
-    {interiors && <Furniture room={room} y={y} color={material.accent} />}
-    {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selected} onSelect={onSelect} />}
-    <RoomLabel room={room} y={y} selected={selected} onSelect={onSelect} visible={showLabels} />
+    {showCeiling && <mesh position={[cx, y + h, cz]} receiveShadow><boxGeometry args={[room.width, .08, room.depth]} /><meshStandardMaterial color={material.ceiling} transparent opacity={.9 * opacity} depthWrite={opacity >= 0.99} /></mesh>}
+    {interiors && <Furniture room={room} y={y} color={material.accent} opacity={opacity} />}
+    {interiors && room.type === "stairs" && <Staircase room={room} y={y} selected={selected} onSelect={onSelect} opacity={opacity} rise={stairRise} />}
+    <RoomLabel room={room} y={y} selected={selected} onSelect={onSelect} visible={showLabels && opacity > 0.75} />
   </group>;
 }
 
-export default function HouseViewer({ plans, materials, selectedId, onSelect, activeFloor, showCeiling, cutaway, mode, interiors }: { plans: FloorPlan[]; materials: Record<string, MaterialSet>; selectedId?: string; onSelect: (id: string) => void; activeFloor: number; showCeiling: boolean; cutaway: boolean; mode: "orbit" | "walk"; interiors: boolean }) {
-  const plan = plans[0];
+export default function HouseViewer({ plans, materials, selectedId, onSelect, activeFloor, showCeiling, cutaway, mode, interiors, focusFloor = null }: { plans: FloorPlan[]; materials: Record<string, MaterialSet>; selectedId?: string; onSelect: (id: string) => void; activeFloor: number; showCeiling: boolean; cutaway: boolean; mode: "orbit" | "walk"; interiors: boolean; focusFloor?: number | null }) {
+  const plan = (focusFloor !== null ? plans.find(item => item.level === focusFloor) : null) ?? plans[0];
   const width = plan?.width || 14;
   const depth = plan?.depth || 18;
   const span = Math.max(width, depth);
   const walking = mode === "walk";
-  const eyeY = (plan?.elevation ?? 0) + WALK_EYE_HEIGHT;
   // Frame closer and higher so the house fills the view instead of reading as a tiny congested diagram.
   const cameraDistance = span * 0.72;
   const cameraHeight = Math.max(28, span * 0.62);
   const lightReach = span * 1.2;
+  const renderPlans = focusFloor === null
+    ? plans
+    : [...plans].sort((a, b) => (a.level === focusFloor ? 1 : 0) - (b.level === focusFloor ? 1 : 0));
   const [walkLocked, setWalkLocked] = useState(false);
 
   useEffect(() => {
@@ -351,18 +403,29 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
       <Suspense fallback={null}>
         <GrassGround width={width} depth={depth} />
         <group position={[-width/2, 0, -depth/2]}>
-          {plans.flatMap(plan => {
+          {renderPlans.flatMap(plan => {
             const visible = activeFloor === -1 || activeFloor === plan.level;
             if (!visible) return [];
-            const geometry = buildPlan3DGeometry(plan);
-            const walls = cutaway ? geometry.walls.filter(wall => !(wall.kind === "exterior" && (wall.x1 >= plan.width - 0.03 || wall.z1 >= plan.depth - 0.03))) : geometry.walls;
-            const firstMaterial = materials[plan.rooms[0]?.id];
+            const focused = focusFloor === null || focusFloor === plan.level;
+            const hiddenEntryOpeningId = plan.level > 0 ? getMainEntryPlacement(plan)?.opening.id : "";
+            const renderPlan = hiddenEntryOpeningId ? { ...plan, openings: plan.openings.filter(opening => opening.id !== hiddenEntryOpeningId) } : plan;
+            const geometry = buildPlan3DGeometry(renderPlan);
+            const walls = cutaway ? geometry.walls.filter(wall => !(wall.kind === "exterior" && (wall.x1 >= renderPlan.width - 0.03 || wall.z1 >= renderPlan.depth - 0.03))) : geometry.walls;
+            const firstMaterial = materials[renderPlan.rooms[0]?.id];
+            const nextPlan = plans.find(candidate => candidate.level === renderPlan.level + 1);
+            const stairRise = nextPlan ? nextPlan.elevation - renderPlan.elevation : 3.2;
+            if (!focused) {
+              return [
+                <FloorSlab key={`${renderPlan.id}-ghost-slab`} plan={renderPlan} material={firstMaterial} opacity={0.018} />,
+                <GhostFloorOutline key={`${renderPlan.id}-ghost-outline`} walls={walls} y={renderPlan.elevation} />,
+              ];
+            }
             return [
-              <FloorSlab key={`${plan.id}-slab`} plan={plan} material={firstMaterial} />,
-              <EntryWalkway key={`${plan.id}-entry-path`} plan={plan} showLabel={!walking} />,
-              ...plan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={plan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} showLabels={!walking} />),
-              ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={plan.elevation} selectedId={selectedId} onSelect={onSelect} />),
-              ...getPlanOpeningPlacements(plan).map(placement => <OpeningMarker key={placement.opening.id} placement={placement} y={plan.elevation} selectedId={selectedId} onSelect={onSelect} />),
+              <FloorSlab key={`${renderPlan.id}-slab`} plan={renderPlan} material={firstMaterial} opacity={1} />,
+              renderPlan.level === 0 && focused ? <EntryWalkway key={`${renderPlan.id}-entry-path`} plan={renderPlan} showLabel={!walking} /> : null,
+              ...renderPlan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={renderPlan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} showLabels={!walking} opacity={1} stairRise={stairRise} />),
+              ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={renderPlan.elevation} selectedId={selectedId} onSelect={onSelect} opacity={1} />),
+              ...getPlanOpeningPlacements(renderPlan).map(placement => <OpeningMarker key={placement.opening.id} placement={placement} y={renderPlan.elevation} selectedId={selectedId} onSelect={onSelect} opacity={1} />),
             ];
           })}
         </group>
@@ -371,7 +434,7 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
       {!walking && <Grid args={[Math.max(120, span * 3), Math.max(120, span * 3)]} cellSize={2} cellThickness={.25} cellColor="#89A177" sectionSize={10} sectionThickness={0.45} sectionColor="#68825E" fadeDistance={span * 2.5} infiniteGrid />}
       {plan && walking && <>
         <WalkCameraRig plan={plan} active={walking} />
-        <WalkMovement active={walking} eyeY={eyeY} />
+        <WalkMovement active={walking} plans={plans} width={width} depth={depth} />
         <PointerLockControls
           makeDefault
           selector=".three-canvas.walk-mode canvas"

@@ -184,22 +184,24 @@ function EntryMarker({ plan, scale }: { plan: FloorPlan; scale: number }) {
   </>;
 }
 
-export default function PlanEditor({ plan, selectedId, onSelect, onUpdate }: { plan: FloorPlan; selectedId?: string; onSelect: (id: string) => void; onUpdate: (room: Room) => void }) {
+export default function PlanEditor({ plan, selectedId, onSelect, onUpdate, showEntry = true }: { plan: FloorPlan; selectedId?: string; onSelect: (id: string) => void; onUpdate: (room: Room) => void; showEntry?: boolean }) {
   const scale = Math.min(9, 520 / plan.depth, 560 / plan.width);
   const unitMark = plan.unit === "feet" ? "'" : "m";
+  const hiddenEntryOpeningId = showEntry ? "" : getMainEntryPlacement(plan)?.opening.id ?? "";
 
   return <div className="plan-canvas" aria-label="Generated structured floor plan">
     <Stage width={plan.width * scale + OFFSET * 2 + 80} height={plan.depth * scale + OFFSET * 2}>
       <Layer>
         <Rect x={OFFSET - 18} y={OFFSET - 18} width={plan.width * scale + 36} height={plan.depth * scale + 36} fill={PAPER}/>
-        <EntryPathShape plan={plan} scale={scale}/>
+        {showEntry && <EntryPathShape plan={plan} scale={scale}/>}
         <Rect x={OFFSET} y={OFFSET} width={plan.width * scale} height={plan.depth * scale} fill={PAPER} stroke={WALL} strokeWidth={4.2} />
         {plan.rooms.map(room => <RoomShape key={room.id} room={room} scale={scale} unitMark={unitMark} selected={room.id === selectedId} onSelect={() => onSelect(room.id)} onChange={onUpdate} />)}
         {plan.openings.map(opening => {
+          if (opening.id === hiddenEntryOpeningId) return null;
           const room = plan.rooms.find(room => room.id === opening.roomId);
           return room ? <OpeningShape key={opening.id} opening={opening} room={room} scale={scale}/> : null;
         })}
-        <EntryMarker plan={plan} scale={scale}/>
+        {showEntry && <EntryMarker plan={plan} scale={scale}/>}
         <Rect x={OFFSET} y={OFFSET} width={plan.width * scale} height={plan.depth * scale} stroke={WALL} strokeWidth={4.2} listening={false}/>
         <Text x={OFFSET} y={8} width={plan.width * scale} text={`${plan.width.toFixed(1)}${unitMark}`} align="center" fontStyle="bold" fontSize={12}/>
         <Text x={6} y={OFFSET + plan.depth * scale / 2 - 10} text={`${plan.depth.toFixed(1)}${unitMark}`} rotation={-90} fontStyle="bold" fontSize={12}/>
