@@ -87,7 +87,7 @@ function roomHasUsableDoor(room: Room, plan: FloorPlan, brief: Brief) {
 }
 
 function roomNeedsExplicitDoor(room: Room) {
-  return ["bedroom", "bathroom", "garage", "stairs", "utility", "laundry", "pantry", "study", "storage"].includes(room.type);
+  return ["bedroom", "bathroom", "garage", "stairs", "utility", "laundry", "pantry", "study", "storage", "balcony"].includes(room.type);
 }
 
 function roomHasDoorToCirculation(room: Room, plan: FloorPlan) {
@@ -244,6 +244,9 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
     if (room.type === "stairs" && !roomHasDoorToCirculation(room, plan)) add(issues, "error", "access", `${room.name} must connect to hallway, foyer, or circulation.`);
     if (room.type === "storage" && !roomHasDoorToAny(room, plan, ["hallway", "foyer", "bedroom", "bathroom", "kitchen", "utility", "laundry", "pantry"])) {
       add(issues, "error", "access", `${room.name} needs a reachable door to circulation or its parent room.`);
+    }
+    if (room.type === "balcony" && !roomHasDoorToAny(room, plan, ["living", "bedroom", "hallway", "foyer", "open"])) {
+      add(issues, "error", "access", `${room.name} needs a door from a room or hallway.`);
     }
     if (["utility", "laundry", "pantry"].includes(room.type) && !roomHasDoorToAny(room, plan, ["kitchen", "hallway", "foyer"])) {
       add(issues, "warning", "access", `${room.name} should connect to the kitchen or service circulation.`);

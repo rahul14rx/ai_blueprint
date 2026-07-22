@@ -80,6 +80,7 @@ export function buildLayoutProgram(brief: Brief): LayoutProgram {
   if (brief.features.includes("pantry")) rooms.push(req(brief, "pantry-1", "Pantry", "pantry", ["near_kitchen"]));
   if (brief.features.includes("study")) rooms.push(req(brief, "study-1", "Study", "study", ["exterior"]));
   if (brief.features.includes("porch")) rooms.push(req(brief, "porch-1", "Porch", "porch", ["front", "road_side"]));
+  if (brief.features.includes("balcony")) rooms.push(req(brief, "balcony-1", "Balcony", "balcony", ["front", "road_side", "exterior"]));
 
   const accessKeys = rooms.filter(room => room.zone !== "outdoor").map(room => room.key);
   accessKeys.forEach(key => edges.push({ from: "entry", to: key, kind: "required_access", weight: 100 }));

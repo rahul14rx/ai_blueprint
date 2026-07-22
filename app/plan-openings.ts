@@ -49,7 +49,8 @@ export function getOpeningPlacement(opening: Opening, room: Room): OpeningPlacem
 }
 
 export function getDoorLeafPlacement(placement: OpeningPlacement): DoorLeafPlacement {
-  const maxLeaf = placement.room.type === "garage" ? placement.end - placement.start : Math.min(placement.end - placement.start, 3.2);
+  const openingLength = placement.end - placement.start;
+  const maxLeaf = placement.room.type === "garage" || placement.room.type === "balcony" ? openingLength : Math.min(openingLength, 3.2);
   const swing = Math.PI / 2.7;
   const rotationY = placement.opening.wall === "north" ? -swing : placement.opening.wall === "south" ? swing : placement.opening.wall === "east" ? -swing : swing;
   return {

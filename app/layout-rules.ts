@@ -31,6 +31,7 @@ export const ROOM_RULES: Record<RoomType, RoomRule> = {
   laundry: { minWidth: 5, minDepth: 6, idealWidth: 6, idealDepth: 7, zone: "service", needsAccess: true },
   storage: { minWidth: 3, minDepth: 3, idealWidth: 4, idealDepth: 5, zone: "service" },
   porch: { minWidth: 5, minDepth: 5, idealWidth: 8, idealDepth: 8, zone: "outdoor" },
+  balcony: { minWidth: 4, minDepth: 5, idealWidth: 8, idealDepth: 6, zone: "outdoor", needsAccess: true },
   open: { minWidth: 4, minDepth: 4, idealWidth: 8, idealDepth: 10, zone: "circulation" },
 };
 
@@ -196,6 +197,7 @@ const ROOM_ALIASES: Array<{ type: RoomType; pattern: RegExp }> = [
   { type: "stairs", pattern: /\b(stair|stairs|staircase)\b/i },
   { type: "foyer", pattern: /\b(foyer|entry|entrance)\b/i },
   { type: "porch", pattern: /\b(porch|veranda|sit-out|sitout)\b/i },
+  { type: "balcony", pattern: /\bbalcony\b/i },
   { type: "study", pattern: /\b(study|office|flex room)\b/i },
   { type: "pantry", pattern: /\bpantry\b/i },
 ];

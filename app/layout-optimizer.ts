@@ -550,7 +550,7 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
   const reachable = reachableRooms(rooms, brief);
 
   program.rooms.forEach(req => {
-    if (countType(rooms, req.type) < program.rooms.filter(room => room.type === req.type).length && !["porch", "utility", "laundry", "pantry"].includes(req.type)) {
+    if (countType(rooms, req.type) < program.rooms.filter(room => room.type === req.type).length && !["porch", "balcony", "utility", "laundry", "pantry"].includes(req.type)) {
       hardErrors.push(`Missing ${req.name}.`);
     }
   });
@@ -563,7 +563,7 @@ function scoreCandidate(brief: Brief, program: LayoutProgram, candidate: Candida
       warnings.push(`${room.name} is larger than its recommended functional size.`);
     }
     const ratio = Math.max(room.width, room.depth) / Math.max(0.01, Math.min(room.width, room.depth));
-    if (!["hallway", "stairs", "porch"].includes(room.type) && ratio > 2.6) {
+    if (!["hallway", "stairs", "porch", "balcony"].includes(room.type) && ratio > 2.6) {
       score -= (ratio - 2.6) * 6;
       warnings.push(`${room.name} is elongated.`);
     }

@@ -65,6 +65,11 @@ function RoomSymbol({ room, scale }: { room: Room; scale: number }) {
     <Circle x={x + w * 0.66} y={y + h * 0.76} radius={Math.min(w, h) * 0.055} stroke={SYMBOL} strokeWidth={1} listening={false}/>
   </>;
 
+  if (room.type === "balcony") return <>
+    {Array.from({ length: 4 }, (_, i) => <Line key={`balcony-rail-${i}`} points={[x + pad, y + pad + i * ((h - pad * 2) / 3), x + w - pad, y + pad + i * ((h - pad * 2) / 3)]} stroke={SYMBOL} strokeWidth={0.8} dash={[4, 3]} listening={false}/>)}
+    <Text x={x + pad} y={y + h - pad - 12} width={w - pad * 2} text="RAILING" align="center" fontFamily="Arial" fontStyle="bold" fontSize={7} fill="#53695B" listening={false}/>
+  </>;
+
   return null;
 }
 
@@ -100,16 +105,19 @@ function RoomShape({ room, scale, unitMark, selected, onSelect, onChange }: { ro
   const fontSize = compact ? 7 : 9;
   const labelY = y + (compact ? 5 : 7);
   const label = `${roomLabel(room)}\n${room.width.toFixed(1)}${unitMark} x ${room.depth.toFixed(1)}${unitMark}`;
+  const balcony = room.type === "balcony";
+  const fill = selected ? SELECTED_FILL : balcony ? "#F3F8EE" : ROOM_FILL;
+  const stroke = selected ? "#D66A38" : balcony ? "#53695B" : INTERNAL_WALL;
 
   return <>
     {room.shape === "rounded"
       ? <>
-        <Path data={roundedRoomPath(x, y, w, h, room.curveSide)} fill={selected ? SELECTED_FILL : ROOM_FILL} stroke={selected ? "#D66A38" : INTERNAL_WALL} strokeWidth={selected ? 2.2 : 1.35} onClick={onSelect} onTap={onSelect}/>
+        <Path data={roundedRoomPath(x, y, w, h, room.curveSide)} fill={fill} stroke={stroke} strokeWidth={selected ? 2.2 : 1.35} onClick={onSelect} onTap={onSelect}/>
         <Rect ref={shape} x={x} y={y} width={w} height={h} fill="transparent" stroke="transparent"
           onClick={onSelect} onTap={onSelect}
           onTransformEnd={() => { const n = shape.current!; const width = Math.max(4, n.width() * n.scaleX() / scale); const depth = Math.max(4, n.height() * n.scaleY() / scale); n.scaleX(1); n.scaleY(1); onChange({ ...room, x: Math.max(0, (n.x()-OFFSET) / scale), y: Math.max(0, (n.y()-OFFSET) / scale), width, depth }); }} />
       </>
-      : <Rect ref={shape} x={x} y={y} width={w} height={h} fill={selected ? SELECTED_FILL : ROOM_FILL} stroke={selected ? "#D66A38" : INTERNAL_WALL} strokeWidth={selected ? 2.2 : 1.35}
+      : <Rect ref={shape} x={x} y={y} width={w} height={h} fill={fill} stroke={stroke} strokeWidth={selected ? 2.2 : 1.35} dash={balcony ? [8, 5] : undefined}
         onClick={onSelect} onTap={onSelect}
         onTransformEnd={() => { const n = shape.current!; const width = Math.max(4, n.width() * n.scaleX() / scale); const depth = Math.max(4, n.height() * n.scaleY() / scale); n.scaleX(1); n.scaleY(1); onChange({ ...room, x: Math.max(0, (n.x()-OFFSET) / scale), y: Math.max(0, (n.y()-OFFSET) / scale), width, depth }); }} />}
     <RoomSymbol room={room} scale={scale}/>
