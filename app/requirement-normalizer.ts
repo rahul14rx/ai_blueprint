@@ -1,4 +1,4 @@
-import type { Brief } from "./studio-types";
+import type { Brief, BriefFurniture, RoomType } from "./studio-types";
 import { removeNegatedFeatures, requestedOptionalFeaturesFromText } from "./layout-rules";
 
 const DIRECTIONS = ["north", "south", "east", "west", "unspecified"] as const;
@@ -142,6 +142,129 @@ function inferRoadSide(text: string): Exclude<Direction, "unspecified"> | undefi
   return reverse?.[1] as Exclude<Direction, "unspecified"> | undefined;
 }
 
+function canonicalRoomType(type: string): RoomType | undefined {
+  const t = type.toLowerCase().trim().replace(/s$/, "");
+  if (t === "bedroom" || t === "bed room" || t === "bed") return "bedroom";
+  if (t === "living" || t === "living room" || t === "lounge" || t === "family room" || t === "family lounge") return "living";
+  if (t === "dining" || t === "dining room") return "dining";
+  if (t === "bathroom" || t === "bath room" || t === "bath" || t === "toilet" || t === "powder" || t === "powder room") return "bathroom";
+  if (t === "kitchen") return "kitchen";
+  if (t === "garage") return "garage";
+  if (t === "stairs" || t === "staircase" || t === "stair") return "stairs";
+  if (t === "foyer" || t === "entry" || t === "entrance") return "foyer";
+  if (t === "hallway" || t === "hall" || t === "circulation") return "hallway";
+  if (t === "utility" || t === "utility room") return "utility";
+  if (t === "study" || t === "office" || t === "flex" || t === "flex room") return "study";
+  if (t === "pantry") return "pantry";
+  if (t === "laundry" || t === "laundry room") return "laundry";
+  if (t === "storage" || t === "store" || t === "closet" || t === "store room" || t === "storeroom") return "storage";
+  if (t === "porch" || t === "veranda" || t === "deck" || t === "balcony" || t === "sit-out" || t === "sitout") return "porch";
+  if (t === "open" || t === "courtyard") return "open";
+
+  const ROOM_TYPES: RoomType[] = [
+    "living", "kitchen", "bedroom", "bathroom", "dining", "garage", "stairs",
+    "foyer", "hallway", "utility", "study", "pantry", "laundry", "storage", "porch", "open"
+  ];
+  return ROOM_TYPES.includes(t as RoomType) ? (t as RoomType) : undefined;
+}
+
+function asFurnitureRequirements(value: unknown): BriefFurniture[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const normalized: BriefFurniture[] = [];
+
+  for (const group of value) {
+    if (typeof group !== "object" || !group) continue;
+    const rawType = String((group as any).roomType || "");
+    const roomType = canonicalRoomType(rawType);
+    if (!roomType) continue;
+
+    const rawItems = (group as any).items;
+    if (!Array.isArray(rawItems)) continue;
+
+    const items: { name: string; width: number; depth: number }[] = [];
+    for (const item of rawItems) {
+      if (typeof item !== "object" || !item) continue;
+      const name = String((item as any).name || "").trim();
+      const width = Number((item as any).width);
+      const depth = Number((item as any).depth);
+
+      if (name && Number.isFinite(width) && Number.isFinite(depth)) {
+        items.push({
+          name,
+          width: Math.max(0.1, width),
+          depth: Math.max(0.1, depth)
+        });
+      }
+    }
+
+    if (items.length > 0) {
+      normalized.push({ roomType, items });
+    }
+  }
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function ensureMandatedFurniture(
+  furniture: BriefFurniture[] | undefined,
+  bedrooms: number,
+  bathrooms: number,
+  livingRooms: number,
+  kitchens: number
+): BriefFurniture[] {
+  const list = furniture ? [...furniture] : [];
+  
+  const ensureRoomItems = (roomType: RoomType, defaultItems: { name: string; width: number; depth: number }[]) => {
+    let existing = list.find(f => f.roomType === roomType);
+    if (!existing) {
+      existing = { roomType, items: [] };
+      list.push(existing);
+    }
+    defaultItems.forEach(defItem => {
+      const lowerDef = defItem.name.toLowerCase();
+      const hasItem = existing!.items.some(item => {
+        const itemLower = item.name.toLowerCase();
+        return itemLower.includes(lowerDef) || lowerDef.includes(itemLower);
+      });
+      if (!hasItem) {
+        existing!.items.push({ ...defItem });
+      }
+    });
+  };
+
+  if (bedrooms > 0) {
+    ensureRoomItems("bedroom", [
+      { name: "Bed", width: 5.5, depth: 6.5 },
+      { name: "Bedside Table 1", width: 1.5, depth: 1.5 },
+      { name: "Bedside Table 2", width: 1.5, depth: 1.5 }
+    ]);
+  }
+  if (bathrooms > 0) {
+    ensureRoomItems("bathroom", [
+      { name: "Bathtub", width: 5.0, depth: 2.5 },
+      { name: "Toilet", width: 1.8, depth: 2.2 },
+      { name: "Sink", width: 2.0, depth: 1.8 }
+    ]);
+  }
+  if (livingRooms > 0) {
+    ensureRoomItems("living", [
+      { name: "Couch", width: 6.5, depth: 3.0 },
+      { name: "Carpet Area Rug", width: 8.0, depth: 6.0 },
+      { name: "TV", width: 4.0, depth: 0.5 },
+      { name: "TV Entertainment Console", width: 4.5, depth: 1.5 }
+    ]);
+  }
+  if (kitchens > 0) {
+    ensureRoomItems("kitchen", [
+      { name: "Kitchen Counter", width: 6.0, depth: 2.0 },
+      { name: "Refrigerator", width: 2.8, depth: 2.8 }
+    ]);
+  }
+
+  return list;
+}
+
 export function normalizeParsedRequirements(value: Record<string, unknown>, prompt: string): Brief {
   const normalizedPrompt = prompt.toLowerCase();
   const inferredPlot = inferPlot(normalizedPrompt);
@@ -154,6 +277,12 @@ export function normalizeParsedRequirements(value: Record<string, unknown>, prom
   const rawIntent = typeof value.layoutIntent === "object" && value.layoutIntent ? value.layoutIntent as Record<string, unknown> : {};
   const adjacency = asStringArray(value.adjacency);
   const unit = typeof value.unit === "string" && value.unit.trim() ? value.unit : inferredPlot?.unit;
+
+  const bedrooms = asInteger(value.bedrooms, inferredBedrooms ?? 0, 0, 12);
+  const bathrooms = asInteger(value.bathrooms, inferredBathrooms ?? 0, 0, 12);
+  const livingRooms = asLivingRoomCount(value.livingRooms, prompt);
+  const kitchens = asSharedRoomCount(value.kitchens, prompt, ["kitchen"], 1);
+
   return {
     title: typeof value.title === "string" && value.title.trim() ? value.title.trim() : "Custom Home Concept",
     prompt,
@@ -161,10 +290,10 @@ export function normalizeParsedRequirements(value: Record<string, unknown>, prom
     plotDepth: asNumber(value.plotDepth, inferredPlot?.plotDepth ?? 60, 8, 1000),
     unit: String(unit).toLowerCase().startsWith("met") ? "metres" : "feet",
     floors: asInteger(value.floors, inferredFloors ?? 1, 1, 3),
-    bedrooms: asInteger(value.bedrooms, inferredBedrooms ?? 0, 0, 12),
-    bathrooms: asInteger(value.bathrooms, inferredBathrooms ?? 0, 0, 12),
-    livingRooms: asLivingRoomCount(value.livingRooms, prompt),
-    kitchens: asSharedRoomCount(value.kitchens, prompt, ["kitchen"], 1),
+    bedrooms,
+    bathrooms,
+    livingRooms,
+    kitchens,
     diningRooms: asSharedRoomCount(value.diningRooms, prompt, ["dining room", "dining area", "dining nook", "dining"], 1),
     style: style[0].toUpperCase() + style.slice(1),
     facing: asDirectionWithFallback(value.facing, inferredFacing),
@@ -179,5 +308,12 @@ export function normalizeParsedRequirements(value: Record<string, unknown>, prom
       garageMode: asEnum(rawIntent.garageMode, GARAGE_MODES, "unspecified"),
       wetCorePreference: asEnum(rawIntent.wetCorePreference, WET_CORE_PREFERENCES, "unspecified"),
     },
+    furnitureRequirements: ensureMandatedFurniture(
+      asFurnitureRequirements(value.furnitureRequirements),
+      bedrooms,
+      bathrooms,
+      livingRooms,
+      kitchens
+    ),
   };
 }

@@ -17,6 +17,7 @@
     "@google/genai": "^2.11.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
+    "acorn": "^8.17.0",
     "drizzle-orm": "0.45.2",
     "konva": "^10.3.0",
     "lucide-react": "^1.24.0",

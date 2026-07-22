@@ -2,6 +2,7 @@ import { Brief, FloorPlan, GenerationTrace, Opening, Project, ROOM_COLORS, Room,
 import { evaluateGroundFloorCandidates } from "./layout-optimizer";
 import { needsWetVentilation, removeNegatedFeatures, requestedOptionalFeaturesFromText, roomMeetsMinimum, wantsAttachedBath } from "./layout-rules";
 import { evaluateArchitecture } from "./architecture-validator";
+import { place_furniture } from "./furniture-layout";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const room = (level: number, name: string, type: RoomType, x: number, y: number, width: number, depth: number): Room => ({ id: `f${level}-${type}-${uid()}`, name, type, x, y, width, depth, color: ROOM_COLORS[type] });
@@ -95,20 +96,21 @@ function inferRoadSide(text: string): Direction | undefined {
 }
 
 export function parseBrief(prompt: string, form: Partial<Brief>): Brief {
-  const lower = prompt.toLowerCase();
-  const inferredFloors = inferFloorCount(lower);
-  const inferredBedrooms = firstCount(lower, /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:bed|bedroom|bedrooms)\b/);
-  const inferredBathrooms = inferBathroomCount(lower);
-  const inferredLivingRooms = inferLivingRoomCount(lower);
-  const inferredKitchens = inferSharedRoomCount(lower, ["kitchen"]);
-  const inferredDiningRooms = inferSharedRoomCount(lower, ["dining room", "dining area", "dining nook", "dining"]);
-  const inferredPlot = inferPlot(lower);
-  const inferredFacing = inferFacing(lower);
-  const inferredRoadSide = inferRoadSide(lower);
-  const inferredStyle = ["modern", "minimal", "traditional", "luxury", "industrial"].find(s => lower.includes(s)) ?? "Modern";
-  const adjacency = form.adjacency || [];
-  const features = removeNegatedFeatures(form.features ?? requestedOptionalFeaturesFromText(prompt, OPTIONAL_FEATURES), prompt, adjacency);
-  return {
+  const lower = prompt.toLowerCase()
+  const inferredFloors = inferFloorCount(lower)
+  const inferredBedrooms = firstCount(lower, /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:bed|bedroom|bedrooms)\b/)
+  const inferredBathrooms = inferBathroomCount(lower)
+  const inferredLivingRooms = inferLivingRoomCount(lower)
+  const inferredKitchens = inferSharedRoomCount(lower, ["kitchen"])
+  const inferredDiningRooms = inferSharedRoomCount(lower, ["dining room", "dining area", "dining nook", "dining"])
+  const inferredPlot = inferPlot(lower)
+  const inferredFacing = inferFacing(lower)
+  const inferredRoadSide = inferRoadSide(lower)
+  const inferredStyle = ["modern", "minimal", "traditional", "luxury", "industrial"].find(s => lower.includes(s)) ?? "Modern"
+  const adjacency = form.adjacency || []
+  const features = removeNegatedFeatures(form.features ?? requestedOptionalFeaturesFromText(prompt, OPTIONAL_FEATURES), prompt, adjacency)
+
+  let new_ = {
     title: form.title || "My Home Concept", prompt, floors: Math.min(3, Math.max(1, form.floors ?? inferredFloors ?? 1)),
     plotWidth: Math.max(8, form.plotWidth ?? inferredPlot?.plotWidth ?? 14), plotDepth: Math.max(8, form.plotDepth ?? inferredPlot?.plotDepth ?? 18), unit: form.unit || inferredPlot?.unit || "feet",
     bedrooms: Math.max(0, form.bedrooms ?? inferredBedrooms ?? 3), bathrooms: Math.max(0, form.bathrooms ?? inferredBathrooms ?? 2),
@@ -117,7 +119,9 @@ export function parseBrief(prompt: string, form: Partial<Brief>): Brief {
     facing: form.facing || inferredFacing || "unspecified", roadSide: form.roadSide || inferredRoadSide || inferredFacing || "unspecified",
     features,
     adjacency, warnings: form.warnings || [],
-  };
+    furnitureRequirements: form.furnitureRequirements
+  }
+  return new_
 }
 
 export function generatePlans(brief: Brief): FloorPlan[] {
@@ -594,10 +598,11 @@ function makeNorthSouthPlan(brief: Brief, level: number, roadSide: "north" | "so
 }
 
 function makeFloorPlan(brief: Brief, level: number, rooms: Room[]): FloorPlan {
-  const planRooms = applyGeneratedRoomIntent(brief, rooms);
-  const plan = { id: `floor-${level}-${uid()}`, level, elevation: level * (brief.unit === "feet" ? 10 : 3.05), width: brief.plotWidth, depth: brief.plotDepth, unit: brief.unit, facing: brief.facing, roadSide: brief.roadSide, rooms: planRooms, openings: [] as Opening[] };
-  plan.openings = generateOpenings(plan, brief);
-  return plan;
+  let new_ = applyGeneratedRoomIntent(brief, rooms)
+  let plan = { id: `floor-${level}-${uid()}`, level, elevation: level * (brief.unit === "feet" ? 10 : 3.05), width: brief.plotWidth, depth: brief.plotDepth, unit: brief.unit, facing: brief.facing, roadSide: brief.roadSide, rooms: new_, openings: [] as Opening[] }
+  plan.openings = generateOpenings(plan, brief)
+  plan = place_furniture(plan, brief)
+  return plan
 }
 
 function applyGeneratedRoomIntent(brief: Brief, rooms: Room[]) {

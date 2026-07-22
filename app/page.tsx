@@ -1,5 +1,7 @@
 import StudioApp from "./studio-app";
+import { supabaseConfigured } from "./api/supabase-admin";
 
 export default function Home() {
-  return <StudioApp />;
+  const isDbConfigured = supabaseConfigured();
+  return <StudioApp initialStage={isDbConfigured ? "login" : "prompt"} />;
 }

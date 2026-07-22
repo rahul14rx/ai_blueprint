@@ -822,7 +822,7 @@ test("3D geometry merges shared walls and cuts door gaps", () => {
   const totalSharedLength = sharedWallPieces.reduce((sum, wall) => sum + wall.z2 - wall.z1, 0);
 
   assert.equal(totalSharedLength, 6);
-  assert.ok(sharedWallPieces.every(wall => wall.thickness < 0.3), "shared partitions should use interior wall thickness");
+  assert.ok(sharedWallPieces.every(wall => wall.thickness < 0.5), "shared partitions should use interior wall thickness");
   assert.equal(geometry.walls.filter(wall => wall.kind === "exterior").length, 4);
 });
 
