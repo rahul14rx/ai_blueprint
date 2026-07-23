@@ -1,4 +1,4 @@
-import type { Brief } from "./studio-types";
+import type { Brief, RoomType } from "./studio-types";
 import { removeNegatedFeatures, requestedOptionalFeaturesFromText } from "./layout-rules";
 
 const DIRECTIONS = ["north", "south", "east", "west", "unspecified"] as const;
@@ -8,6 +8,19 @@ const CIRCULATION_STYLES = ["central_spine", "side_spine", "loop", "foyer_split"
 const ZONING_PREFERENCES = ["public_front", "private_rear", "split_bedrooms", "service_side", "unspecified"] as const;
 const GARAGE_MODES = ["none", "front", "side", "rear", "unspecified"] as const;
 const WET_CORE_PREFERENCES = ["side", "center", "stacked", "split", "unspecified"] as const;
+const FURNITURE_ROOM_TYPES: RoomType[] = ["bathroom", "kitchen", "living", "bedroom", "dining", "study", "utility", "laundry", "pantry", "garage"];
+const DEFAULT_FURNITURE_REQUIREMENTS: NonNullable<Brief["furnitureRequirements"]> = [
+  { roomType: "bathroom", items: [{ name: "Bathtub", width: 2.5, depth: 5.5 }, { name: "Toilet", width: 1.8, depth: 2.2 }, { name: "Sink", width: 2.4, depth: 1.8 }] },
+  { roomType: "kitchen", items: [{ name: "Kitchen Counter", width: 2.2, depth: 8 }, { name: "Refrigerator", width: 2.8, depth: 2.8 }] },
+  { roomType: "living", items: [{ name: "Couch", width: 7, depth: 3 }, { name: "Carpet Area Rug", width: 6, depth: 4 }, { name: "TV", width: 4, depth: 0.5 }, { name: "TV Entertainment Console", width: 5, depth: 1.5 }] },
+  { roomType: "bedroom", items: [{ name: "Bed", width: 5, depth: 6.5 }, { name: "Bedside Table", width: 1.4, depth: 1.4 }] },
+  { roomType: "dining", items: [{ name: "Dining Table", width: 5, depth: 3 }, { name: "Dining Chair", width: 1.4, depth: 1.4 }] },
+  { roomType: "study", items: [{ name: "Desk", width: 4, depth: 2 }, { name: "Study Chair", width: 1.6, depth: 1.6 }] },
+  { roomType: "utility", items: [{ name: "Utility Counter", width: 4, depth: 2 }] },
+  { roomType: "laundry", items: [{ name: "Washer Dryer", width: 3, depth: 2.5 }] },
+  { roomType: "pantry", items: [{ name: "Storage Shelves", width: 3.5, depth: 1.5 }] },
+  { roomType: "garage", items: [{ name: "Car", width: 7, depth: 14 }] },
+];
 
 type Direction = (typeof DIRECTIONS)[number];
 type Feature = (typeof FEATURES)[number];
@@ -47,6 +60,27 @@ function asDirectionWithFallback(value: unknown, fallback: Direction | undefined
 
 function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter(item => typeof item === "string").map(item => item.trim()).filter(Boolean) : [];
+}
+
+function asFurnitureRequirements(value: unknown): NonNullable<Brief["furnitureRequirements"]> {
+  if (!Array.isArray(value)) return DEFAULT_FURNITURE_REQUIREMENTS;
+  const parsed = value.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Record<string, unknown>;
+    const roomTypeText = String(record.roomType ?? "").toLowerCase().replaceAll(" ", "_");
+    const roomType = FURNITURE_ROOM_TYPES.find(item => item === roomTypeText || item.includes(roomTypeText) || roomTypeText.includes(item));
+    if (!roomType || !Array.isArray(record.items)) return [];
+    const items = record.items.flatMap(item => {
+      if (!item || typeof item !== "object") return [];
+      const itemRecord = item as Record<string, unknown>;
+      const name = String(itemRecord.name ?? "").trim();
+      const width = asNumber(itemRecord.width, 2, 0.5, 20);
+      const depth = asNumber(itemRecord.depth, 2, 0.5, 20);
+      return name ? [{ name, width, depth }] : [];
+    });
+    return items.length ? [{ roomType, items }] : [];
+  });
+  return parsed.length ? parsed : DEFAULT_FURNITURE_REQUIREMENTS;
 }
 
 function normalizeWarnings(value: unknown, prompt: string) {
@@ -172,6 +206,7 @@ export function normalizeParsedRequirements(value: Record<string, unknown>, prom
     features: mergedFeatures(value.features, prompt, adjacency),
     adjacency,
     warnings: normalizeWarnings(value.warnings, prompt),
+    furnitureRequirements: asFurnitureRequirements(value.furnitureRequirements),
     layoutIntent: {
       layoutType: asEnum(rawIntent.layoutType, LAYOUT_TYPES, "unspecified"),
       circulationStyle: asEnum(rawIntent.circulationStyle, CIRCULATION_STYLES, "unspecified"),

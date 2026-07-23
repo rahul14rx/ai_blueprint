@@ -294,9 +294,23 @@ function WalkCameraRig({ plan, active }: { plan: FloorPlan; active: boolean }) {
 }
 
 function Wall({ position, size, color, id, selected, onSelect, opacity = 1 }: { position: [number, number, number]; size: [number, number, number]; color: string; id: string; selected: boolean; onSelect: (id: string) => void; opacity?: number }) {
-  return <mesh position={position} castShadow={opacity > 0.5} receiveShadow={opacity > 0.5} onClick={e => { e.stopPropagation(); onSelect(id); }}>
-    <boxGeometry args={size} /><meshStandardMaterial color={selected ? "#EF7545" : color} {...fadeProps(opacity)} roughness={.84} />
-  </mesh>;
+  const horizontal = size[0] >= size[2];
+  const trimColor = selected ? "#EF7545" : "#BCA98D";
+  const trimY = position[1] - size[1] / 2 + 0.42;
+  const trimLength = Math.max(0.2, horizontal ? size[0] : size[2]);
+  const trimThickness = 0.09;
+  const trimInset = (horizontal ? size[2] : size[0]) / 2 + 0.035;
+
+  return <group onClick={e => { e.stopPropagation(); onSelect(id); }}>
+    <mesh position={position} castShadow={opacity > 0.5} receiveShadow={opacity > 0.5}>
+      <boxGeometry args={size} />
+      <meshStandardMaterial color={selected ? "#EF7545" : color} {...fadeProps(opacity)} roughness={0.88} metalness={0.01} />
+    </mesh>
+    {opacity > 0.7 && [-1, 1].map(side => <mesh key={`${id}-base-${side}`} position={horizontal ? [position[0], trimY, position[2] + trimInset * side] : [position[0] + trimInset * side, trimY, position[2]]} receiveShadow>
+      <boxGeometry args={horizontal ? [trimLength, 0.18, trimThickness] : [trimThickness, 0.18, trimLength]} />
+      <meshStandardMaterial color={trimColor} roughness={0.72} />
+    </mesh>)}
+  </group>;
 }
 
 function GrassGround({ width, depth }: { width: number; depth: number }) {
@@ -573,6 +587,21 @@ function trimBalconyRailWalls(walls: WallSegment3D[], plan: FloorPlan) {
   return walls.flatMap(wall => trimWallByIntervals(wall, balconyRailIntervals(wall, plan)));
 }
 
+function windowProfile(room: Room, length: number) {
+  const type = room.type;
+  const wetOrService = type === "bathroom" || type === "utility" || type === "laundry" || type === "pantry";
+  const publicRoom = type === "living" || type === "dining" || type === "kitchen";
+  const width = wetOrService ? Math.min(length, 3.2) : publicRoom ? Math.max(length, Math.min(5.2, room.width * 0.38)) : length;
+  return {
+    width,
+    height: wetOrService ? 1.45 : publicRoom ? 2.65 : 2.25,
+    sill: wetOrService ? 5.35 : publicRoom ? 2.85 : 3.15,
+    frame: publicRoom ? "#4E6758" : "#53695B",
+    glass: publicRoom ? "#B7DAD8" : "#C6E1E2",
+    curtain: type === "bedroom" ? "#D2B49C" : type === "living" || type === "dining" ? "#C9B78E" : null,
+  };
+}
+
 function BalconyRailing({ room, plan, y, selected, onSelect, opacity = 1 }: { room: Room; plan: FloorPlan; y: number; selected: boolean; onSelect: (id: string) => void; opacity?: number }) {
   const railColor = selected ? "#EF7545" : "#53695B";
   const curbColor = selected ? "#EF7545" : "#DAD2C1";
@@ -701,12 +730,59 @@ function OpeningMarker({ placement, y, selectedId, onSelect, opacity = 1, isOpen
     </group>;
   }
 
-  const height = opening.kind === "window" ? 2.35 : 1.1;
-  const sill = opening.kind === "window" ? 3.2 : 6.2;
+  const profile = opening.kind === "window" ? windowProfile(placement.room, length) : null;
+  const height = profile?.height ?? 1.1;
+  const sill = profile?.sill ?? 6.2;
+  const visualLength = profile?.width ? Math.min(length, profile.width) : length;
+  const start = placement.center - visualLength / 2;
+  const end = placement.center + visualLength / 2;
   const position: [number, number, number] = horizontal
     ? [placement.center, y + sill + height / 2, placement.coord]
     : [placement.coord, y + sill + height / 2, placement.center];
-  const size: [number, number, number] = horizontal ? [length, height, 0.08] : [0.08, height, length];
+  const size: [number, number, number] = horizontal ? [visualLength, height, 0.08] : [0.08, height, visualLength];
+
+  if (opening.kind === "window" && profile) {
+    const frameColor = isSelected ? "#EF7545" : profile.frame;
+    const glassColor = isSelected ? "#7FC7DC" : profile.glass;
+    const normalOffset = opening.wall === "north" || opening.wall === "west" ? 0.18 : -0.18;
+    const curtainOffset = opening.wall === "north" || opening.wall === "west" ? 0.25 : -0.25;
+    const sideFrameSize: [number, number, number] = horizontal ? [0.13, height + 0.28, 0.16] : [0.16, height + 0.28, 0.13];
+    const railFrameSize: [number, number, number] = horizontal ? [visualLength + 0.28, 0.13, 0.16] : [0.16, 0.13, visualLength + 0.28];
+    const mullionSize: [number, number, number] = horizontal ? [0.1, height, 0.13] : [0.13, height, 0.1];
+    const sillSize: [number, number, number] = horizontal ? [visualLength + 0.7, 0.16, 0.46] : [0.46, 0.16, visualLength + 0.7];
+    const curtainWidth = Math.max(0.55, Math.min(visualLength * 0.26, 1.35));
+
+    return <group onClick={event => { event.stopPropagation(); onSelect(id); }}>
+      <mesh position={position} receiveShadow>
+        <boxGeometry args={size} />
+        <meshPhysicalMaterial color={glassColor} transparent opacity={0.5 * opacity} depthWrite={false} roughness={0.06} metalness={0.02} transmission={0.18} />
+      </mesh>
+      {[start, end].map((edge, index) => <mesh key={`${opening.id}-frame-side-${index}`} position={horizontal ? [edge, y + sill + height / 2, placement.coord + normalOffset] : [placement.coord + normalOffset, y + sill + height / 2, edge]} castShadow receiveShadow>
+        <boxGeometry args={sideFrameSize} />
+        <meshStandardMaterial color={frameColor} {...fadeProps(opacity)} roughness={0.5} />
+      </mesh>)}
+      {[sill, sill + height].map((edgeY, index) => <mesh key={`${opening.id}-frame-rail-${index}`} position={horizontal ? [placement.center, y + edgeY, placement.coord + normalOffset] : [placement.coord + normalOffset, y + edgeY, placement.center]} castShadow receiveShadow>
+        <boxGeometry args={railFrameSize} />
+        <meshStandardMaterial color={frameColor} {...fadeProps(opacity)} roughness={0.5} />
+      </mesh>)}
+      <mesh position={horizontal ? [placement.center, y + sill + height / 2, placement.coord + normalOffset] : [placement.coord + normalOffset, y + sill + height / 2, placement.center]} castShadow receiveShadow>
+        <boxGeometry args={mullionSize} />
+        <meshStandardMaterial color={frameColor} {...fadeProps(opacity)} roughness={0.5} />
+      </mesh>
+      <mesh position={horizontal ? [placement.center, y + sill - 0.2, placement.coord + normalOffset] : [placement.coord + normalOffset, y + sill - 0.2, placement.center]} castShadow receiveShadow>
+        <boxGeometry args={sillSize} />
+        <meshStandardMaterial color="#E4DDCF" {...fadeProps(opacity)} roughness={0.78} />
+      </mesh>
+      {profile.curtain && [start + curtainWidth / 2, end - curtainWidth / 2].map((center, index) => <mesh key={`${opening.id}-curtain-${index}`} position={horizontal ? [center, y + sill + height / 2, placement.coord + curtainOffset] : [placement.coord + curtainOffset, y + sill + height / 2, center]} receiveShadow>
+        <boxGeometry args={horizontal ? [curtainWidth, height + 0.35, 0.06] : [0.06, height + 0.35, curtainWidth]} />
+        <meshStandardMaterial color={profile.curtain} transparent opacity={0.68 * opacity} depthWrite={false} roughness={0.82} />
+      </mesh>)}
+      {profile.curtain && <mesh position={horizontal ? [placement.center, y + sill + height + 0.25, placement.coord + curtainOffset] : [placement.coord + curtainOffset, y + sill + height + 0.25, placement.center]} receiveShadow>
+        <boxGeometry args={horizontal ? [visualLength + 0.45, 0.12, 0.08] : [0.08, 0.12, visualLength + 0.45]} />
+        <meshStandardMaterial color="#6B5A3D" {...fadeProps(opacity)} roughness={0.56} />
+      </mesh>}
+    </group>;
+  }
 
   return <mesh position={position} onClick={event => { event.stopPropagation(); onSelect(id); }}>
     <boxGeometry args={size} />

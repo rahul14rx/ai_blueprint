@@ -2,6 +2,7 @@ import { Brief, FloorPlan, GenerationTrace, Opening, Project, ROOM_COLORS, Room,
 import { evaluateGroundFloorCandidates } from "./layout-optimizer";
 import { needsWetVentilation, removeNegatedFeatures, requestedOptionalFeaturesFromText, roomMeetsMinimum, roomRule, wantsAttachedBath } from "./layout-rules";
 import { evaluateArchitecture } from "./architecture-validator";
+import { place_furniture } from "./furniture-layout";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const room = (level: number, name: string, type: RoomType, x: number, y: number, width: number, depth: number): Room => ({ id: `f${level}-${type}-${uid()}`, name, type, x, y, width, depth, color: ROOM_COLORS[type] });
@@ -598,7 +599,7 @@ function makeFloorPlan(brief: Brief, level: number, rooms: Room[]): FloorPlan {
   const planRooms = fillUnassignedPlanAreas(brief, level, applyGeneratedRoomIntent(brief, addBalconyIfRequested(brief, level, rooms)));
   const plan = { id: `floor-${level}-${uid()}`, level, elevation: level * (brief.unit === "feet" ? 10 : 3.05), width: brief.plotWidth, depth: brief.plotDepth, unit: brief.unit, facing: brief.facing, roadSide: brief.roadSide, rooms: planRooms, openings: [] as Opening[] };
   plan.openings = generateOpenings(plan, brief);
-  return plan;
+  return place_furniture(plan, brief);
 }
 
 function fillUnassignedPlanAreas(brief: Brief, level: number, rooms: Room[]) {

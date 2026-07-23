@@ -192,13 +192,24 @@ function EntryMarker({ plan, scale }: { plan: FloorPlan; scale: number }) {
   </>;
 }
 
-export default function PlanEditor({ plan, selectedId, onSelect, onUpdate, showEntry = true }: { plan: FloorPlan; selectedId?: string; onSelect: (id: string) => void; onUpdate: (room: Room) => void; showEntry?: boolean }) {
+export default function PlanEditor({ plan, selectedId, onSelect, onUpdate, showEntry = true, onCapture }: { plan: FloorPlan; selectedId?: string; onSelect: (id: string) => void; onUpdate: (room: Room) => void; showEntry?: boolean; onCapture?: (base64: string) => void }) {
   const scale = Math.min(9, 520 / plan.depth, 560 / plan.width);
   const unitMark = plan.unit === "feet" ? "'" : "m";
   const hiddenEntryOpeningId = showEntry ? "" : getMainEntryPlacement(plan)?.opening.id ?? "";
+  const stageRef = useRef<Konva.Stage>(null);
+
+  useEffect(() => {
+    if (!stageRef.current || !onCapture) return undefined;
+    const timer = window.setTimeout(() => {
+      if (!stageRef.current) return;
+      const dataUrl = stageRef.current.toDataURL({ pixelRatio: 1.5 });
+      onCapture(dataUrl.replace(/^data:image\/(png|jpeg|jpg);base64,/, ""));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [onCapture, plan.id, plan.openings.length, plan.rooms.length, showEntry]);
 
   return <div className="plan-canvas" aria-label="Generated structured floor plan">
-    <Stage width={plan.width * scale + OFFSET * 2 + 80} height={plan.depth * scale + OFFSET * 2}>
+    <Stage ref={stageRef} width={plan.width * scale + OFFSET * 2 + 80} height={plan.depth * scale + OFFSET * 2}>
       <Layer>
         <Rect x={OFFSET - 18} y={OFFSET - 18} width={plan.width * scale + 36} height={plan.depth * scale + 36} fill={PAPER}/>
         {showEntry && <EntryPathShape plan={plan} scale={scale}/>}

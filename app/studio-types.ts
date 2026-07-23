@@ -1,13 +1,15 @@
 export type Point = { x: number; y: number };
 export type RoomType = "living" | "kitchen" | "bedroom" | "bathroom" | "dining" | "garage" | "stairs" | "foyer" | "hallway" | "utility" | "study" | "pantry" | "laundry" | "storage" | "porch" | "balcony" | "open";
 export type WallSide = "north" | "south" | "east" | "west";
-export type Room = { id: string; name: string; type: RoomType; x: number; y: number; width: number; depth: number; color: string; shape?: "rect" | "rounded"; curveSide?: WallSide };
+export type Furniture = { id: string; name: string; width: number; depth: number; x: number; y: number };
+export type BriefFurniture = { roomType: RoomType; items: { name: string; width: number; depth: number }[] };
+export type Room = { id: string; name: string; type: RoomType; x: number; y: number; width: number; depth: number; color: string; shape?: "rect" | "rounded"; curveSide?: WallSide; furniture?: Furniture[] };
 export type Opening = { id: string; kind: "door" | "window" | "vent"; wall: WallSide; roomId: string; offset: number; width: number };
 export type FloorPlan = { id: string; level: number; elevation: number; width: number; depth: number; unit: "feet" | "metres"; facing: Brief["facing"]; roadSide: Brief["roadSide"]; rooms: Room[]; openings: Opening[] };
 export type GenerationTraceCandidate = { label: string; source: "baseline" | "experimental"; score: number; valid: boolean; selected: boolean; errors: string[]; warnings: string[] };
 export type GenerationTrace = { selectedLabel: string; candidates: GenerationTraceCandidate[] };
 export type LayoutIntent = { layoutType: "compact" | "open" | "villa" | "duplex" | "courtyard" | "unspecified"; circulationStyle: "central_spine" | "side_spine" | "loop" | "foyer_split" | "courtyard_ring" | "unspecified"; zoningPreference: "public_front" | "private_rear" | "split_bedrooms" | "service_side" | "unspecified"; garageMode: "none" | "front" | "side" | "rear" | "unspecified"; wetCorePreference: "side" | "center" | "stacked" | "split" | "unspecified" };
-export type Brief = { title: string; prompt: string; floors: number; plotWidth: number; plotDepth: number; unit: "feet" | "metres"; bedrooms: number; bathrooms: number; livingRooms: number; kitchens: number; diningRooms: number; style: string; facing: "north" | "south" | "east" | "west" | "unspecified"; roadSide: "north" | "south" | "east" | "west" | "unspecified"; features: string[]; adjacency: string[]; warnings: string[]; layoutIntent?: LayoutIntent };
+export type Brief = { title: string; prompt: string; floors: number; plotWidth: number; plotDepth: number; unit: "feet" | "metres"; bedrooms: number; bathrooms: number; livingRooms: number; kitchens: number; diningRooms: number; style: string; facing: "north" | "south" | "east" | "west" | "unspecified"; roadSide: "north" | "south" | "east" | "west" | "unspecified"; features: string[]; adjacency: string[]; warnings: string[]; layoutIntent?: LayoutIntent; furnitureRequirements?: BriefFurniture[] };
 export type Surface = "floor" | "wall" | "ceiling";
 export type MaterialSet = { floor: string; wall: string; ceiling: string; accent: string };
 export type RoofTemplate = "none" | "flat" | "gable" | "hip" | "designer";

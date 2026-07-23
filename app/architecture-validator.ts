@@ -3,7 +3,7 @@ import { ROOM_RULES, exteriorWalls, isCirculationLike, needsWetVentilation, requ
 
 export type ArchitectureIssue = {
   severity: "error" | "warning";
-  category: "size" | "access" | "adjacency" | "light" | "road" | "brief";
+  category: "size" | "access" | "adjacency" | "light" | "road" | "brief" | "space";
   message: string;
 };
 
@@ -185,6 +185,42 @@ function planFeet(plan: FloorPlan, feet: number) {
   return plan.unit === "feet" ? feet : feet * 0.3048;
 }
 
+function planArea(brief: Brief, squareFeet: number) {
+  const unitScale = toUnit(brief, 1);
+  return squareFeet * unitScale * unitScale;
+}
+
+function isGeneratedPocket(room: Room) {
+  return /\b(access|service|storage)\s+pocket\b|\bopen\s+(circulation|terrace)?\s*lounge\b|\bservice\s+lobby\b|\bgarage\s+lobby\b|\bmudroom\s*\/\s*garage\s+lobby\b/i.test(room.name);
+}
+
+function largeRoomWasRequested(room: Room, brief: Brief) {
+  const text = `${brief.prompt} ${brief.adjacency.join(" ")}`.toLowerCase();
+  if (!/\b(large|spacious|oversized|grand|luxury|master|suite|double[-\s]?height)\b/.test(text)) return false;
+  if (room.type === "bedroom") return /\b(master|bedroom|suite|private)\b/.test(text);
+  if (room.type === "living") return /\b(living|great room|lounge|hall|double[-\s]?height)\b/.test(text);
+  if (room.type === "kitchen") return /\b(kitchen)\b/.test(text);
+  if (room.type === "dining") return /\b(dining)\b/.test(text);
+  return false;
+}
+
+function oversizedFunctionalArea(room: Room, brief: Brief) {
+  const maxArea: Partial<Record<RoomType, number>> = {
+    bedroom: 260,
+    kitchen: 230,
+    dining: 230,
+    bathroom: 90,
+    utility: 180,
+    laundry: 150,
+    pantry: 170,
+    storage: 95,
+    foyer: 140,
+  };
+  const limit = maxArea[room.type];
+  if (!limit || largeRoomWasRequested(room, brief)) return false;
+  return room.width * room.depth > planArea(brief, limit);
+}
+
 function anyNearAcrossHall(plan: FloorPlan, first: RoomType, second: RoomType) {
   return plan.rooms.some(a => roomMatches(a, first) && plan.rooms.some(b => {
     if (!roomMatches(b, second)) return false;
@@ -217,6 +253,12 @@ export function evaluateArchitecture(brief: Brief, plan: FloorPlan): Architectur
     if (!rule) return;
     if (!roomMeetsMinimum(room, brief)) {
       add(issues, "error", "size", `${room.name} is below the recommended ${rule.minWidth} ft x ${rule.minDepth} ft minimum.`);
+    }
+    if (oversizedFunctionalArea(room, brief)) {
+      add(issues, "warning", "space", `${room.name} is oversized for its stated function; split it into a purposeful room, closet, or circulation zone.`);
+    }
+    if (isGeneratedPocket(room) && room.width * room.depth > planArea(brief, 90)) {
+      add(issues, "warning", "space", `${room.name} is a large generated leftover zone; assign it a clear purpose or absorb it into nearby rooms.`);
     }
     if (roomExceedsMaximum(room, brief)) {
       add(issues, "warning", "size", `${room.name} is larger than the recommended functional range for a ${room.type}.`);

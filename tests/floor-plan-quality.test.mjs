@@ -180,6 +180,46 @@ function assertBlocking(brief) {
   return blocking;
 }
 
+test("architecture report warns about oversized rooms and leftover generated pockets", () => {
+  const brief = makeBrief({
+    prompt: "Create a simple 40 ft x 60 ft east-facing 2 bedroom house.",
+    bedrooms: 2,
+    bathrooms: 0,
+    kitchens: 0,
+    diningRooms: 0,
+    features: [],
+  });
+  const plan = {
+    id: "oversized-space-plan",
+    level: 0,
+    elevation: 0,
+    width: 40,
+    depth: 60,
+    unit: "feet",
+    facing: "east",
+    roadSide: "east",
+    rooms: [
+      { id: "foyer", name: "Foyer", type: "foyer", x: 30, y: 0, width: 10, depth: 8, color: "#fff" },
+      { id: "hall", name: "Central hallway", type: "hallway", x: 26, y: 0, width: 4, depth: 60, color: "#fff" },
+      { id: "bed-1", name: "Bedroom 1", type: "bedroom", x: 0, y: 0, width: 26, depth: 32, color: "#fff" },
+      { id: "pocket", name: "Open circulation lounge", type: "open", x: 0, y: 32, width: 26, depth: 18, color: "#fff" },
+      { id: "bed-2", name: "Bedroom 2", type: "bedroom", x: 0, y: 50, width: 26, depth: 10, color: "#fff" },
+    ],
+    openings: [
+      { id: "entry", kind: "door", wall: "east", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "foyer-hall", kind: "door", wall: "west", roomId: "foyer", offset: 0.5, width: 3 },
+      { id: "bed-1-door", kind: "door", wall: "east", roomId: "bed-1", offset: 0.5, width: 3 },
+      { id: "bed-2-door", kind: "door", wall: "east", roomId: "bed-2", offset: 0.5, width: 3 },
+      { id: "bed-1-window", kind: "window", wall: "west", roomId: "bed-1", offset: 0.5, width: 4 },
+      { id: "bed-2-window", kind: "window", wall: "west", roomId: "bed-2", offset: 0.5, width: 4 },
+    ],
+  };
+
+  const report = evaluateArchitecture(brief, plan);
+  assert.ok(report.warnings.some(message => /Bedroom 1 is oversized/i.test(message)), report.warnings.join("\n"));
+  assert.ok(report.warnings.some(message => /large generated leftover zone/i.test(message)), report.warnings.join("\n"));
+});
+
 test("40x60 east-facing 2BHK with garage, stairs, utility, and attached bath", () => {
   assertQuality(makeBrief({
     prompt: "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, a living room, kitchen beside the dining room, a one-car garage, an internal staircase and a utility room. One bathroom should be attached. The road is on the east side. Prioritize ventilation, practical circulation and no room overlaps.",
