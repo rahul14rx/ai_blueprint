@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Billboard, Environment, Grid, OrbitControls, PointerLockControls, Text } from "@react-three/drei";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BufferGeometry, DoubleSide, Float32BufferAttribute, Vector3 } from "three";
-import { FloorPlan, MaterialSet, Room, RoofTemplate, WallSide } from "./studio-types";
+import { FloorPlan, MaterialSet, Opening, Room, RoofTemplate, WallSide } from "./studio-types";
 import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
 import { getDoorLeafPlacement, getEntryPath, getMainEntryPlacement, getPlanOpeningPlacements, OpeningPlacement } from "./plan-openings";
 
@@ -513,7 +513,7 @@ function RoofGeometry({ plan, template, opacity = 1 }: { plan: FloorPlan; templa
   return null;
 }
 
-function SharedWall({ wall, y, selectedId, onSelect, opacity = 1, material }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void; opacity?: number; material?: MaterialSet }) {
+function SharedWall({ wall, y, selectedId, onSelect, opacity = 1, material, selectionId }: { wall: WallSegment3D; y: number; selectedId?: string; onSelect: (id: string) => void; opacity?: number; material?: MaterialSet; selectionId?: string }) {
   const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
   const position: [number, number, number] = wall.orientation === "horizontal"
     ? [(wall.x1 + wall.x2) / 2, y + wall.bottom + wall.height / 2, wall.z1]
@@ -522,8 +522,9 @@ function SharedWall({ wall, y, selectedId, onSelect, opacity = 1, material }: { 
     ? [length, wall.height, wall.thickness]
     : [wall.thickness, wall.height, length];
   const color = wall.kind === "exterior" ? (material?.wall ?? "#EEE8DD") : "#DCD5C8";
+  const id = selectionId ?? wall.id;
 
-  return <Wall id={wall.id} selected={selectedId === wall.id} onSelect={onSelect} position={position} size={size} color={color} opacity={opacity} />;
+  return <Wall id={id} selected={selectedId === id} onSelect={onSelect} position={position} size={size} color={color} opacity={opacity} />;
 }
 
 function sameLine(a: number, b: number) {
@@ -992,7 +993,81 @@ function RoomGeometry({ room, plan, material, activeFloor, showCeiling, selected
   </group>;
 }
 
-export default function HouseViewer({ plans, materials, selectedId, onSelect, activeFloor, showCeiling, cutaway, mode, interiors, focusFloor = null, roofTemplate = "none" }: { plans: FloorPlan[]; materials: Record<string, MaterialSet>; selectedId?: string; onSelect: (id: string) => void; activeFloor: number; showCeiling: boolean; cutaway: boolean; mode: "orbit" | "walk"; interiors: boolean; focusFloor?: number | null; roofTemplate?: RoofTemplate }) {
+type SelectionInfo = { title: string; badge: string; details: string[]; readyForEdit: boolean; openingKind?: Opening["kind"]; canAddWindow?: boolean };
+
+function getSelectedInfo(plans: FloorPlan[], selectedId?: string): SelectionInfo | null {
+  if (!selectedId) return null;
+
+  for (const plan of plans) {
+    const renderPlan = planWithoutUpperEntry(plan);
+    const floorLabel = `Floor ${renderPlan.level + 1}`;
+    const room = renderPlan.rooms.find(item => item.id === selectedId);
+    if (room) {
+      return {
+        title: room.name,
+        badge: "Room",
+        details: [floorLabel, `${room.width.toFixed(1)} ft x ${room.depth.toFixed(1)} ft`, room.type.replaceAll("_", " ")],
+        readyForEdit: false,
+      };
+    }
+
+    const opening = getPlanOpeningPlacements(renderPlan).find(placement => `opening-${placement.opening.id}` === selectedId);
+    if (opening) {
+      return {
+        title: opening.opening.kind === "door" ? "Door opening" : opening.opening.kind === "window" ? "Window opening" : "Vent opening",
+        badge: "Opening",
+        details: [floorLabel, `${opening.room.name} - ${opening.opening.wall} wall`, `${opening.opening.width.toFixed(1)} ft wide`],
+        readyForEdit: true,
+        openingKind: opening.opening.kind,
+      };
+    }
+
+    const geometry = buildPlan3DGeometry(renderPlan);
+    const wallPrefix = `${renderPlan.id}:wall:`;
+    const wallId = selectedId.startsWith(wallPrefix) ? selectedId.slice(wallPrefix.length) : selectedId;
+    const wall = geometry.walls.find(item => item.id === wallId);
+    if (wall && (selectedId.startsWith(wallPrefix) || selectedId.startsWith("wall-"))) {
+      const length = wall.orientation === "horizontal" ? wall.x2 - wall.x1 : wall.z2 - wall.z1;
+      return {
+        title: wall.kind === "exterior" ? "Exterior wall" : "Interior wall",
+        badge: "Wall",
+        details: [floorLabel, `${length.toFixed(1)} ft long`, `${wall.height.toFixed(1)} ft high`],
+        readyForEdit: true,
+        canAddWindow: wall.kind === "exterior",
+      };
+    }
+  }
+
+  return null;
+}
+
+function SelectionInspector({ info, onClear, onReplaceOpening, onAddWindow }: { info: SelectionInfo | null; onClear: () => void; onReplaceOpening?: (kind: "door" | "window") => void; onAddWindow?: () => void }) {
+  if (!info) {
+    return <div className="selection-inspector muted">
+      <b>Click a 3D item</b>
+      <span>Select a wall, door, window, or room to inspect it.</span>
+    </div>;
+  }
+
+  return <div className="selection-inspector">
+    <div>
+      <small>{info.badge}</small>
+      <button onClick={onClear} aria-label="Clear selection">x</button>
+    </div>
+    <b>{info.title}</b>
+    {info.details.map(detail => <span key={detail}>{detail}</span>)}
+    <em>{info.readyForEdit ? "Ready for add / replace controls next." : "Room selected for inspection."}</em>
+    {info.openingKind && onReplaceOpening && <div className="selection-actions">
+      {info.openingKind !== "door" && <button onClick={() => onReplaceOpening("door")}>Replace with door</button>}
+      {info.openingKind !== "window" && <button onClick={() => onReplaceOpening("window")}>Replace with window</button>}
+    </div>}
+    {info.canAddWindow && onAddWindow && <div className="selection-actions">
+      <button onClick={onAddWindow}>Add window</button>
+    </div>}
+  </div>;
+}
+
+export default function HouseViewer({ plans, materials, selectedId, onSelect, activeFloor, showCeiling, cutaway, mode, interiors, focusFloor = null, roofTemplate = "none", onReplaceOpening, onAddWindow }: { plans: FloorPlan[]; materials: Record<string, MaterialSet>; selectedId?: string; onSelect: (id: string) => void; activeFloor: number; showCeiling: boolean; cutaway: boolean; mode: "orbit" | "walk"; interiors: boolean; focusFloor?: number | null; roofTemplate?: RoofTemplate; onReplaceOpening?: (kind: "door" | "window") => void; onAddWindow?: () => void }) {
   const plan = (focusFloor !== null ? plans.find(item => item.level === focusFloor) : null) ?? plans[0];
   const width = plan?.width || 14;
   const depth = plan?.depth || 18;
@@ -1020,6 +1095,7 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
   const [openDoorState, setOpenDoorState] = useState<{ signature: string; ids: Set<string> }>(() => ({ signature: "", ids: new Set() }));
   const [doorHint, setDoorHint] = useState("");
   const openDoorIds = openDoorState.signature === planSignature ? openDoorState.ids : new Set<string>();
+  const selectionInfo = useMemo(() => getSelectedInfo(plans, selectedId), [plans, selectedId]);
 
   const toggleDoor = useCallback((id: string) => {
     setOpenDoorState(previous => {
@@ -1069,7 +1145,7 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
               <FloorSlab key={`${renderPlan.id}-slab`} plan={renderPlan} material={firstMaterial} opacity={1} stairVoid={stairVoid} />,
               renderPlan.level === 0 && focused ? <EntryWalkway key={`${renderPlan.id}-entry-path`} plan={renderPlan} showLabel={!walking} /> : null,
               ...renderPlan.rooms.map(room => <RoomGeometry key={room.id} room={room} plan={renderPlan} material={materials[room.id]} activeFloor={activeFloor} showCeiling={showCeiling} selectedId={selectedId} onSelect={onSelect} interiors={interiors} showLabels={!walking} opacity={1} stairRise={stairRise} stairMode={getStairMode(room)} />),
-              ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={renderPlan.elevation} selectedId={selectedId} onSelect={onSelect} opacity={1} material={firstMaterial} />),
+              ...walls.map(wall => <SharedWall key={wall.id} wall={wall} y={renderPlan.elevation} selectedId={selectedId} onSelect={onSelect} opacity={1} material={firstMaterial} selectionId={`${renderPlan.id}:wall:${wall.id}`} />),
               ...getPlanOpeningPlacements(renderPlan).map(placement => <OpeningMarker key={placement.opening.id} placement={placement} y={renderPlan.elevation} selectedId={selectedId} onSelect={onSelect} opacity={1} isOpen={openDoorIds.has(doorStateId(renderPlan, placement))} alwaysOpen={isBalconyDoorPlacement(placement, renderPlan)} />),
               roofPlanIds.has(renderPlan.id) ? <RoofGeometry key={`${renderPlan.id}-roof-${roofTemplate}`} plan={renderPlan} template={roofTemplate} /> : null,
             ];
@@ -1090,5 +1166,6 @@ export default function HouseViewer({ plans, materials, selectedId, onSelect, ac
       </>}
       {mode === "orbit" && <OrbitControls makeDefault target={[0, 3, 0]} maxPolarAngle={Math.PI / 2.05} minDistance={span * 0.35} maxDistance={span * 1.8} />}
     </Canvas>
+    {!walking && <SelectionInspector info={selectionInfo} onClear={() => onSelect("")} onReplaceOpening={onReplaceOpening} onAddWindow={onAddWindow} />}
   </div>;
 }

@@ -7,7 +7,8 @@ import { evaluateBriefFeasibility } from "./layout-feasibility";
 import HouseViewer from "./house-viewer";
 import PlanEditor from "./plan-editor";
 import PreviewView from "./preview-view";
-import { Brief, FloorPlan, MaterialSet, Project, RoofTemplate } from "./studio-types";
+import { Brief, FloorPlan, MaterialSet, Opening, Project, RoofTemplate, Room, WallSide } from "./studio-types";
+import { buildPlan3DGeometry, WallSegment3D } from "./plan-3d-geometry";
 
 const EXAMPLE = "Create a modern ground-floor plan for a 40 ft x 60 ft east-facing plot. Include 2 bedrooms, 2 bathrooms, a living room, kitchen beside the dining room, a one-car garage, an internal staircase and a utility room. One bathroom should be attached. The road is on the east side. Prioritize ventilation, practical circulation and no room overlaps.";
 type RevisionResponse = { ok?: boolean; brief?: Brief; changeSummary?: string; warnings?: string[]; errors?: string[]; changedFields?: string[]; error?: string };
@@ -42,6 +43,182 @@ function createPlanVersion(project: Project, number: number, summary: string, so
 function getStairAnchor(nextProject: Project | null): StairAnchor | null {
   const stairs = nextProject?.plans[0]?.rooms.find(room => room.type === "stairs");
   return stairs ? { x: stairs.x, y: stairs.y, width: stairs.width, depth: stairs.depth, label: stairs.name } : null;
+}
+
+function replacementWidth(kind: "door" | "window", opening: Opening, plan: FloorPlan) {
+  const room = plan.rooms.find(item => item.id === opening.roomId);
+  if (kind === "door") return room?.type === "garage" ? Math.max(8, opening.width) : 3.2;
+  if (room?.type === "bathroom" || room?.type === "utility" || room?.type === "laundry" || room?.type === "pantry") return 2.8;
+  if (room?.type === "living" || room?.type === "dining" || room?.type === "kitchen") return 4.8;
+  return 4;
+}
+
+function centeredOpeningOffset(opening: Opening, plan: FloorPlan, nextWidth: number) {
+  const room = plan.rooms.find(item => item.id === opening.roomId);
+  if (!room) return opening.offset;
+  const horizontal = opening.wall === "north" || opening.wall === "south";
+  const roomLength = horizontal ? room.width : room.depth;
+  if (roomLength <= nextWidth + 0.2) return null;
+  const currentStart = (roomLength - opening.width) * opening.offset;
+  const currentCenter = currentStart + opening.width / 2;
+  const nextOffset = (currentCenter - nextWidth / 2) / (roomLength - nextWidth);
+  return Math.max(0.08, Math.min(0.92, nextOffset));
+}
+
+function lineClose(a: number, b: number) {
+  return Math.abs(a - b) < 0.04;
+}
+
+function intervalOverlap(a1: number, a2: number, b1: number, b2: number) {
+  return Math.min(a2, b2) - Math.max(a1, b1);
+}
+
+function roomSideInterval(room: Room, side: WallSide) {
+  const horizontal = side === "north" || side === "south";
+  return {
+    start: horizontal ? room.x : room.y,
+    end: horizontal ? room.x + room.width : room.y + room.depth,
+    length: horizontal ? room.width : room.depth,
+  };
+}
+
+function wallInterval(wall: WallSegment3D) {
+  return wall.orientation === "horizontal"
+    ? { start: wall.x1, end: wall.x2 }
+    : { start: wall.z1, end: wall.z2 };
+}
+
+function baseWallIdFromSelection(wallId: string) {
+  return wallId.replace(/-balcony-trim-\d+$/, "");
+}
+
+function roomWindowPriority(room: Room) {
+  if (room.type === "living") return 9;
+  if (room.type === "bedroom") return 8;
+  if (room.type === "kitchen" || room.type === "dining" || room.type === "study") return 7;
+  if (room.type === "utility" || room.type === "laundry" || room.type === "bathroom") return 5;
+  if (room.type === "garage" || room.type === "stairs" || room.type === "hallway") return 2;
+  return 4;
+}
+
+function subtractBlockedIntervals(
+  intervals: Array<{ start: number; end: number }>,
+  blocked: Array<{ start: number; end: number }>,
+) {
+  return blocked.reduce((available, block) => available.flatMap(interval => {
+    const start = Math.max(interval.start, block.start);
+    const end = Math.min(interval.end, block.end);
+    if (end <= start) return [interval];
+    return [
+      { start: interval.start, end: start },
+      { start: end, end: interval.end },
+    ].filter(next => next.end - next.start > 0.4);
+  }), intervals);
+}
+
+function wallSideForRoom(room: Room, wall: WallSegment3D): WallSide | null {
+  if (wall.orientation === "horizontal") {
+    if (lineClose(wall.z1, room.y) && intervalOverlap(wall.x1, wall.x2, room.x, room.x + room.width) > 0.5) return "north";
+    if (lineClose(wall.z1, room.y + room.depth) && intervalOverlap(wall.x1, wall.x2, room.x, room.x + room.width) > 0.5) return "south";
+    return null;
+  }
+  if (lineClose(wall.x1, room.x) && intervalOverlap(wall.z1, wall.z2, room.y, room.y + room.depth) > 0.5) return "west";
+  if (lineClose(wall.x1, room.x + room.width) && intervalOverlap(wall.z1, wall.z2, room.y, room.y + room.depth) > 0.5) return "east";
+  return null;
+}
+
+function addProjectWindow(source: Project, selectedId: string) {
+  const plan = source.plans[0];
+  const wallPrefix = `${plan.id}:wall:`;
+  if (!selectedId.startsWith(wallPrefix)) return { error: "Select an exterior wall first." };
+
+  const wallId = selectedId.slice(wallPrefix.length);
+  const baseWallId = baseWallIdFromSelection(wallId);
+  const wall = buildPlan3DGeometry(plan).walls.find(item => item.id === wallId || item.id === baseWallId);
+  if (!wall) return { error: "Could not find the selected wall in the current plan." };
+  if (wall.kind !== "exterior") return { error: "For now, windows can only be added to exterior walls." };
+
+  const selectedWallInterval = wallInterval(wall);
+  const candidateRooms = plan.rooms
+    .map(room => {
+      const side = wallSideForRoom(room, wall);
+      if (!side) return null;
+      const roomInterval = roomSideInterval(room, side);
+      const overlap = intervalOverlap(selectedWallInterval.start, selectedWallInterval.end, roomInterval.start, roomInterval.end);
+      return overlap > 0.5 ? { room, side, roomInterval, overlap } : null;
+    })
+    .filter((item): item is { room: Room; side: WallSide; roomInterval: { start: number; end: number; length: number }; overlap: number } => Boolean(item))
+    .sort((a, b) => (b.overlap - a.overlap) || (roomWindowPriority(b.room) - roomWindowPriority(a.room)));
+  if (!candidateRooms.length) return { error: "That wall does not map cleanly to a room. Try another exterior wall face." };
+
+  const { room, side, roomInterval } = candidateRooms[0];
+  const selectedStart = Math.max(selectedWallInterval.start, roomInterval.start) - roomInterval.start;
+  const selectedEnd = Math.min(selectedWallInterval.end, roomInterval.end) - roomInterval.start;
+  const existingBlocks = plan.openings
+    .filter(opening => opening.roomId === room.id && opening.wall === side)
+    .map(opening => {
+      const start = opening.offset * (roomInterval.length - opening.width);
+      return { start: start - 0.45, end: start + opening.width + 0.45 };
+    });
+  const availableIntervals = subtractBlockedIntervals(
+    [{ start: Math.max(0.55, selectedStart), end: Math.min(roomInterval.length - 0.55, selectedEnd) }],
+    existingBlocks,
+  ).sort((a, b) => (b.end - b.start) - (a.end - a.start));
+  const targetInterval = availableIntervals[0];
+  if (!targetInterval || targetInterval.end - targetInterval.start < 2.4) return { error: "That wall section is too crowded for a clean window." };
+
+  const preferredWidth = room.type === "bathroom" || room.type === "utility" || room.type === "laundry" || room.type === "pantry" ? 2.6 : 4.2;
+  const width = Math.min(preferredWidth, Math.max(2.4, targetInterval.end - targetInterval.start - 0.5));
+  const center = (targetInterval.start + targetInterval.end) / 2;
+  const offset = (center - width / 2) / (roomInterval.length - width);
+  if (offset < 0.06 || offset > 0.94) return { error: "Window would be too close to a corner." };
+
+  const newOpening: Opening = {
+    id: `window-${room.id}-${side}-${Date.now().toString(36)}`,
+    kind: "window",
+    wall: side,
+    roomId: room.id,
+    offset,
+    width,
+  };
+  const nextPlan: FloorPlan = { ...plan, openings: [...plan.openings, newOpening] };
+  const nextProject: Project = { ...source, plans: [nextPlan], updatedAt: new Date().toISOString() };
+  const nextArchitecture = evaluateArchitecture(nextProject.brief, nextPlan);
+  const nextErrors = [...validatePlans(nextProject.plans), ...nextArchitecture.errors];
+  if (nextErrors.length) return { error: `Window was blocked: ${nextErrors.slice(0, 2).join(" ")}` };
+
+  return {
+    project: nextProject,
+    selectedId: `opening-${newOpening.id}`,
+    summary: `Added a window to ${room.name}.`,
+  };
+}
+
+function replaceProjectOpening(source: Project, selectedId: string, kind: "door" | "window") {
+  const openingId = selectedId.startsWith("opening-") ? selectedId.slice("opening-".length) : "";
+  if (!openingId) return { error: "Select a door or window first." };
+  const plan = source.plans[0];
+  const opening = plan.openings.find(item => item.id === openingId);
+  if (!opening) return { error: "Could not find the selected opening in the current plan." };
+  if (opening.kind === kind) return { error: `That opening is already a ${kind}.` };
+
+  const nextWidth = replacementWidth(kind, opening, plan);
+  const nextOffset = centeredOpeningOffset(opening, plan, nextWidth);
+  if (nextOffset === null) return { error: "That wall is too short for the requested replacement." };
+
+  const nextPlan: FloorPlan = {
+    ...plan,
+    openings: plan.openings.map(item => item.id === opening.id ? { ...item, kind, width: nextWidth, offset: nextOffset } : item),
+  };
+  const nextProject: Project = { ...source, plans: [nextPlan], updatedAt: new Date().toISOString() };
+  const nextArchitecture = evaluateArchitecture(nextProject.brief, nextPlan);
+  const nextErrors = [...validatePlans(nextProject.plans), ...nextArchitecture.errors];
+  if (nextErrors.length) return { error: `Replacement was blocked: ${nextErrors.slice(0, 2).join(" ")}` };
+
+  return {
+    project: nextProject,
+    summary: `Replaced ${opening.kind} with ${kind} in ${plan.rooms.find(room => room.id === opening.roomId)?.name ?? "selected room"}.`,
+  };
 }
 
 export default function StudioApp() {
@@ -386,6 +563,67 @@ export default function StudioApp() {
       return { ...entry, previewImageUrl: url, previewVersions: nextVersions };
     }));
   }
+  function replaceSingleOpening(kind: "door" | "window") {
+    if (!project) return;
+    const result = replaceProjectOpening(project, selectedId, kind);
+    if (!("project" in result)) {
+      setRevisionFeedback({ kind: "error", summary: result.error, details: ["Old plan was kept unchanged."] });
+      return;
+    }
+    const entry = createPlanVersion(result.project, versionHistory.length + 1, result.summary, "revision");
+    const nextHistory = [...versionHistory, entry];
+    setProject(entry.project); setBrief(entry.project.brief); setVersionHistory(nextHistory); setActiveVersionId(entry.id); setBlueprintImage("");
+    setRevisionFeedback({ kind: "ok", summary: result.summary, details: ["2D and 3D updated from the same structured opening data."] });
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id);
+  }
+  function replaceMultiOpening(kind: "door" | "window") {
+    if (!activeMultiProject) return;
+    const result = replaceProjectOpening(activeMultiProject, selectedId, kind);
+    if (!("project" in result)) {
+      setMultiFloorRevisionFeedback(current => ({ ...current, [activeMultiFloor]: { kind: "error", summary: result.error, details: ["Old floor plan was kept unchanged."] } }));
+      return;
+    }
+    const existingHistory = multiFloorVersionHistory[activeMultiFloor] ?? [];
+    const entry = createPlanVersion(result.project, existingHistory.length + 1, result.summary, "revision");
+    const nextHistory = [...existingHistory, entry];
+    setMultiFloorProjects(current => ({ ...current, [activeMultiFloor]: entry.project }));
+    setMultiFloorVersionHistory(current => ({ ...current, [activeMultiFloor]: nextHistory }));
+    setMultiFloorActiveVersionId(current => ({ ...current, [activeMultiFloor]: entry.id }));
+    setMultiFloorRevisionFeedback(current => ({ ...current, [activeMultiFloor]: { kind: "ok", summary: result.summary, details: ["2D and 3D updated from the same structured opening data."] } }));
+    if (activeMultiFloor === 1) setMultiFloorStairAnchor(getStairAnchor(entry.project));
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id, entry.project.brief.prompt);
+  }
+  function addSingleWindow() {
+    if (!project) return;
+    const result = addProjectWindow(project, selectedId);
+    if (!("project" in result)) {
+      setRevisionFeedback({ kind: "error", summary: result.error, details: ["Old plan was kept unchanged."] });
+      return;
+    }
+    const entry = createPlanVersion(result.project, versionHistory.length + 1, result.summary, "revision");
+    const nextHistory = [...versionHistory, entry];
+    setProject(entry.project); setBrief(entry.project.brief); setVersionHistory(nextHistory); setActiveVersionId(entry.id); setSelectedId(result.selectedId); setBlueprintImage("");
+    setRevisionFeedback({ kind: "ok", summary: result.summary, details: ["2D and 3D updated from the same structured wall data."] });
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id);
+  }
+  function addMultiWindow() {
+    if (!activeMultiProject) return;
+    const result = addProjectWindow(activeMultiProject, selectedId);
+    if (!("project" in result)) {
+      setMultiFloorRevisionFeedback(current => ({ ...current, [activeMultiFloor]: { kind: "error", summary: result.error, details: ["Old floor plan was kept unchanged."] } }));
+      return;
+    }
+    const existingHistory = multiFloorVersionHistory[activeMultiFloor] ?? [];
+    const entry = createPlanVersion(result.project, existingHistory.length + 1, result.summary, "revision");
+    const nextHistory = [...existingHistory, entry];
+    setMultiFloorProjects(current => ({ ...current, [activeMultiFloor]: entry.project }));
+    setMultiFloorVersionHistory(current => ({ ...current, [activeMultiFloor]: nextHistory }));
+    setMultiFloorActiveVersionId(current => ({ ...current, [activeMultiFloor]: entry.id }));
+    setSelectedId(result.selectedId);
+    setMultiFloorRevisionFeedback(current => ({ ...current, [activeMultiFloor]: { kind: "ok", summary: result.summary, details: ["2D and 3D updated from the same structured wall data."] } }));
+    if (activeMultiFloor === 1) setMultiFloorStairAnchor(getStairAnchor(entry.project));
+    void saveProjectDesignSnapshot(entry.project, nextHistory, entry.id, entry.project.brief.prompt);
+  }
   const roofControls = viewMode === "3d" ? <div className="roof-style-picker" aria-label="Roof style"><span>Roof</span>{ROOF_OPTIONS.map(option => <button key={option.value} className={roofTemplate===option.value?"active":""} onClick={()=>setRoofTemplate(option.value)}>{option.label}</button>)}</div> : null;
   async function applyRevision() {
     if (!project || revisionText.trim().length < 5) return;
@@ -428,15 +666,17 @@ export default function StudioApp() {
       {projectModalOpen&&<div className="project-modal-backdrop"><div className="project-modal" role="dialog" aria-modal="true"><button className="modal-close" onClick={()=>setProjectModalOpen(false)} aria-label="Close"><X size={17}/></button><span className="eyebrow"><Plus size={14}/> Create project</span><h2>New home design</h2><label>Project name<input value={projectName} onChange={e=>setProjectName(e.target.value)} placeholder="East-facing family house"/></label><div className="house-type-choice"><button className={floorCount===1?"active":""} onClick={()=>{ setFloorCount(1); setHomeMode("single"); }}><Home size={18}/><b>Single floor</b><small>Current stable flow</small></button><button className={floorCount>1?"active":""} onClick={()=>{ setFloorCount(2); setHomeMode("multi"); }}><Box size={18}/><b>Multi floor</b><small>Up to 3 floors</small></button></div>{homeMode==="multi"&&<div className="floor-choice-row modal-floor-row"><span>Floors</span>{([2,3] as const).map(count=><button key={count} className={floorCount===count?"active":""} onClick={()=>setFloorCount(count)}>{count} floors</button>)}</div>}<button className="primary-btn wide" onClick={createSavedProject} disabled={projectName.trim().length<2||projectsLoading}>{projectsLoading?"Creating...":"Create project"} <ChevronRight size={17}/></button></div></div>}
     </section>}
 
-    {stage==="multiSetup"&&<section className="multi-floor-screen"><div className="multi-floor-intro"><span className="eyebrow"><Box size={14}/> Multi-floor project</span><h1>{projectName || "Multi-floor home"}</h1><p>Build each level separately first. Upper floors reuse the staircase position from the level below.</p></div>{(!allMultiFloorsGenerated||showMultiFloorPrompts)&&<div className="floor-planning-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className={activeMultiFloor===floor&&!multiCombinedView?"floor-planning-card active":"floor-planning-card"}><div className="floor-card-head"><span>{String(floor).padStart(2,"0")}</span><div><h2>Floor {floor}</h2><p>{floor===1?"Ground-floor plan":"Upper-floor plan"}</p></div><button className="mini-select-btn" onClick={()=>{setActiveMultiFloor(floor); setMultiCombinedView(false); setSelectedId("");}}>View</button></div><textarea value={multiFloorPrompts[floor] ?? ""} onChange={e=>setMultiFloorPrompts(current=>({...current,[floor]:e.target.value}))} rows={5} placeholder={floor===1?"Describe the ground floor with entry, shared spaces and staircase.":"Describe rooms for this floor. Staircase position will stay aligned."}/><div className="floor-status-row"><span>{multiFloorLoading[floor]?"Generating...":multiFloorStatus(floor)}</span><button className={canGenerateMultiFloor(floor)?"primary-btn":"secondary-btn"} onClick={()=>generateMultiFloor(floor)} disabled={!canGenerateMultiFloor(floor)||!!multiFloorLoading[floor]}>{multiFloorLoading[floor]?"Generating...":multiFloorButtonLabel(floor)} <ChevronRight size={14}/></button></div>{multiFloorErrors[floor]&&<div className="revision-feedback error"><b>{multiFloorErrors[floor]}</b></div>}</article>)}</div>}{allMultiFloorsGenerated&&<div className="multi-floor-selector"><div>{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><button key={floor} className={!multiCombinedView&&activeMultiFloor===floor?"active":""} onClick={()=>{setActiveMultiFloor(floor); setMultiCombinedView(false); setSelectedId("");}}>Floor {floor}</button>)}<button className={multiCombinedView?"active":""} onClick={()=>{setMultiCombinedView(true); setViewMode("2d"); setCombined3DFocusFloor(null); setSelectedId("");}}>Combined floors</button></div><button className="secondary-btn" onClick={()=>setShowMultiFloorPrompts(value=>!value)}>{showMultiFloorPrompts?"Hide prompts":"Edit prompts"}</button></div>}{multiCombinedView&&allMultiFloorsGenerated?<section className="combined-floor-result"><div className="board-toolbar"><span><Ruler/>{viewMode==="2d"?"Combined 2D floor comparison":"Stacked multi-floor 3D model"}</span><div><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}</div></div>{viewMode==="2d"?<div className="combined-plan-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className="combined-plan-card"><h2>Floor {floor}</h2><PlanEditor plan={multiFloorProjects[floor].plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} showEntry={floor===1}/></article>)}</div>:viewMode==="render"?<div className="combined-plan-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className="combined-plan-card"><h2>Floor {floor}</h2><PreviewView plan={multiFloorProjects[floor].plans[0]}/></article>)}</div>:<div className="combined-3d-wrap"><HouseViewer plans={stackedMultiPlans} materials={stackedMultiMaterials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={-1} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} focusFloor={combined3DFocusFloor} roofTemplate={roofTemplate}/><div className="floor-focus-panel"><button className={combined3DFocusFloor===null?"active":""} onClick={()=>setCombined3DFocusFloor(null)}>Combined</button>{Array.from({ length: floorCount }, (_, index)=>index).map(index=><button key={index} className={combined3DFocusFloor===index?"active":""} onClick={()=>setCombined3DFocusFloor(index)}>Floor {index+1}</button>)}</div></div>}</section>:activeMultiProject?<section className="plan-result multi-plan-result"><aside className="plan-summary"><span className="eyebrow">Selected floor</span><h2>Floor {activeMultiFloor}</h2><p>{activeMultiProject.brief.facing}-facing {activeMultiProject.brief.plotWidth} x {activeMultiProject.brief.plotDepth} {activeMultiProject.brief.unit}</p><div className="validation-card"><div className={activeMultiErrors.length?"status error":"status valid"}>{activeMultiErrors.length?<AlertTriangle/>:<Check/>}<span><b>{activeMultiErrors.length?"Needs correction":"Architecture checked"}</b><small>{activeMultiErrors.length?`${activeMultiErrors.length} issue(s)`:activeMultiArchitecture?`Quality score ${activeMultiArchitecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{activeMultiErrors.map(error=><p key={error}>{error}</p>)}{!activeMultiErrors.length&&activeMultiArchitecture?.warnings.map(warning=><p className="arch-warning" key={warning}>{warning}</p>)}</div>{activeMultiVersionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{activeMultiVersionHistory.map(entry=><button key={entry.id} className={multiFloorActiveVersionId[activeMultiFloor]===entry.id?"active":""} onClick={()=>loadMultiFloorVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise floor {activeMultiFloor}</h3><textarea value={activeMultiRevisionText} onChange={e=>setMultiFloorRevisionText(current=>({...current,[activeMultiFloor]:e.target.value}))} rows={4} placeholder="Example: move bedroom closer to hall, widen stair landing, add balcony near front."/><button className="primary-btn wide" onClick={applyMultiFloorRevision} disabled={multiFloorRevisionLoading||activeMultiRevisionText.trim().length<5}>{multiFloorRevisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{activeMultiRevisionFeedback.summary&&<div className={activeMultiRevisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{activeMultiRevisionFeedback.summary}</b>{activeMultiRevisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{activeMultiProject.plans[0].rooms.map(room=><button key={room.id} className={selectedId===room.id?"active":""} onClick={()=>setSelectedId(room.id)}><i style={{background:room.color}}/><span>{room.name}</span><small>{room.width.toFixed(1)} x {room.depth.toFixed(1)}</small></button>)}</div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Floor {activeMultiFloor} geometry / measurements in {activeMultiProject.brief.unit}</span><div><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}<button onClick={()=>generateMultiFloor(activeMultiFloor)}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={activeMultiProject.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} showEntry={activeMultiFloor===1}/>:viewMode==="render"?<div className="preview-canvas"><PreviewView plan={activeMultiProject.plans[0]}/></div>:<div className="preview-canvas"><HouseViewer plans={activeMultiProject.plans} materials={activeMultiProject.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} roofTemplate={roofTemplate}/></div>}<div className="board-footer"><span>Floor {activeMultiFloor} concept plan - staircase alignment is preserved for upper-floor generation.</span><button className="approve-btn" disabled={activeMultiErrors.length>0}><Check/> Mark floor as approved</button></div></div></section>:<div className="multi-preview-empty stacked"><Box size={34}/><b>No floor generated yet</b><span>Generate Floor {activeMultiFloor} to preview the 2D and 3D plan below.</span></div>}</section>}
+    {stage==="multiSetup"&&<section className="multi-floor-screen"><div className="multi-floor-intro"><span className="eyebrow"><Box size={14}/> Multi-floor project</span><h1>{projectName || "Multi-floor home"}</h1><p>Build each level separately first. Upper floors reuse the staircase position from the level below.</p></div>{(!allMultiFloorsGenerated||showMultiFloorPrompts)&&<div className="floor-planning-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className={activeMultiFloor===floor&&!multiCombinedView?"floor-planning-card active":"floor-planning-card"}><div className="floor-card-head"><span>{String(floor).padStart(2,"0")}</span><div><h2>Floor {floor}</h2><p>{floor===1?"Ground-floor plan":"Upper-floor plan"}</p></div><button className="mini-select-btn" onClick={()=>{setActiveMultiFloor(floor); setMultiCombinedView(false); setSelectedId("");}}>View</button></div><textarea value={multiFloorPrompts[floor] ?? ""} onChange={e=>setMultiFloorPrompts(current=>({...current,[floor]:e.target.value}))} rows={5} placeholder={floor===1?"Describe the ground floor with entry, shared spaces and staircase.":"Describe rooms for this floor. Staircase position will stay aligned."}/><div className="floor-status-row"><span>{multiFloorLoading[floor]?"Generating...":multiFloorStatus(floor)}</span><button className={canGenerateMultiFloor(floor)?"primary-btn":"secondary-btn"} onClick={()=>generateMultiFloor(floor)} disabled={!canGenerateMultiFloor(floor)||!!multiFloorLoading[floor]}>{multiFloorLoading[floor]?"Generating...":multiFloorButtonLabel(floor)} <ChevronRight size={14}/></button></div>{multiFloorErrors[floor]&&<div className="revision-feedback error"><b>{multiFloorErrors[floor]}</b></div>}</article>)}</div>}{allMultiFloorsGenerated&&<div className="multi-floor-selector"><div>{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><button key={floor} className={!multiCombinedView&&activeMultiFloor===floor?"active":""} onClick={()=>{setActiveMultiFloor(floor); setMultiCombinedView(false); setSelectedId("");}}>Floor {floor}</button>)}<button className={multiCombinedView?"active":""} onClick={()=>{setMultiCombinedView(true); setViewMode("2d"); setCombined3DFocusFloor(null); setSelectedId("");}}>Combined floors</button></div><button className="secondary-btn" onClick={()=>setShowMultiFloorPrompts(value=>!value)}>{showMultiFloorPrompts?"Hide prompts":"Edit prompts"}</button></div>}{multiCombinedView&&allMultiFloorsGenerated?<section className="combined-floor-result"><div className="board-toolbar"><span><Ruler/>{viewMode==="2d"?"Combined 2D floor comparison":"Stacked multi-floor 3D model"}</span><div><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}</div></div>{viewMode==="2d"?<div className="combined-plan-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className="combined-plan-card"><h2>Floor {floor}</h2><PlanEditor plan={multiFloorProjects[floor].plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} showEntry={floor===1}/></article>)}</div>:viewMode==="render"?<div className="combined-plan-grid">{Array.from({ length: floorCount }, (_, index)=>index+1).map(floor=><article key={floor} className="combined-plan-card"><h2>Floor {floor}</h2><PreviewView plan={multiFloorProjects[floor].plans[0]}/></article>)}</div>:<div className="combined-3d-wrap"><HouseViewer plans={stackedMultiPlans} materials={stackedMultiMaterials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={-1} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} focusFloor={combined3DFocusFloor} roofTemplate={roofTemplate}/><div className="floor-focus-panel"><button className={combined3DFocusFloor===null?"active":""} onClick={()=>setCombined3DFocusFloor(null)}>Combined</button>{Array.from({ length: floorCount }, (_, index)=>index).map(index=><button key={index} className={combined3DFocusFloor===index?"active":""} onClick={()=>setCombined3DFocusFloor(index)}>Floor {index+1}</button>)}</div></div>}</section>:activeMultiProject?<section className="plan-result multi-plan-result"><aside className="plan-summary"><span className="eyebrow">Selected floor</span><h2>Floor {activeMultiFloor}</h2><p>{activeMultiProject.brief.facing}-facing {activeMultiProject.brief.plotWidth} x {activeMultiProject.brief.plotDepth} {activeMultiProject.brief.unit}</p><div className="validation-card"><div className={activeMultiErrors.length?"status error":"status valid"}>{activeMultiErrors.length?<AlertTriangle/>:<Check/>}<span><b>{activeMultiErrors.length?"Needs correction":"Architecture checked"}</b><small>{activeMultiErrors.length?`${activeMultiErrors.length} issue(s)`:activeMultiArchitecture?`Quality score ${activeMultiArchitecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{activeMultiErrors.map(error=><p key={error}>{error}</p>)}{!activeMultiErrors.length&&activeMultiArchitecture?.warnings.map(warning=><p className="arch-warning" key={warning}>{warning}</p>)}</div>{activeMultiVersionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{activeMultiVersionHistory.map(entry=><button key={entry.id} className={multiFloorActiveVersionId[activeMultiFloor]===entry.id?"active":""} onClick={()=>loadMultiFloorVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise floor {activeMultiFloor}</h3><textarea value={activeMultiRevisionText} onChange={e=>setMultiFloorRevisionText(current=>({...current,[activeMultiFloor]:e.target.value}))} rows={4} placeholder="Example: move bedroom closer to hall, widen stair landing, add balcony near front."/><button className="primary-btn wide" onClick={applyMultiFloorRevision} disabled={multiFloorRevisionLoading||activeMultiRevisionText.trim().length<5}>{multiFloorRevisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{activeMultiRevisionFeedback.summary&&<div className={activeMultiRevisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{activeMultiRevisionFeedback.summary}</b>{activeMultiRevisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{activeMultiProject.plans[0].rooms.map(room=><button key={room.id} className={selectedId===room.id?"active":""} onClick={()=>setSelectedId(room.id)}><i style={{background:room.color}}/><span>{room.name}</span><small>{room.width.toFixed(1)} x {room.depth.toFixed(1)}</small></button>)}</div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Floor {activeMultiFloor} geometry / measurements in {activeMultiProject.brief.unit}</span><div><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}<button onClick={()=>generateMultiFloor(activeMultiFloor)}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={activeMultiProject.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} showEntry={activeMultiFloor===1}/>:viewMode==="render"?<div className="preview-canvas"><PreviewView plan={activeMultiProject.plans[0]}/></div>:<div className="preview-canvas"><HouseViewer plans={activeMultiProject.plans} materials={activeMultiProject.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} roofTemplate={roofTemplate} onReplaceOpening={replaceMultiOpening} onAddWindow={addMultiWindow}/></div>}<div className="board-footer"><span>Floor {activeMultiFloor} concept plan - staircase alignment is preserved for upper-floor generation.</span><button className="approve-btn" disabled={activeMultiErrors.length>0}><Check/> Mark floor as approved</button></div></div></section>:<div className="multi-preview-empty stacked"><Box size={34}/><b>No floor generated yet</b><span>Generate Floor {activeMultiFloor} to preview the 2D and 3D plan below.</span></div>}</section>}
 
     {stage==="prompt" && <section className="prompt-only"><div className="prompt-intro"><span className="eyebrow"><Sparkles size={14}/> {homeMode==="single"?"Single-floor requirement parser":"Live AI requirement parser"}</span><h1>Describe your home. <em>Verify before we draw.</em></h1><p>The AI extracts plot dimensions, orientation, rooms, features and adjacency rules. A deterministic geometry engine then creates the measurable plan.</p><div className="accuracy-rules"><h3>Accuracy rules</h3><span><Check/>No invented dimensions</span><span><Check/>No room overlaps</span><span><Check/>Plot boundary validation</span><span><Check/>Explicit facing and road side</span><span><Check/>Structured room coordinates</span></div></div><div className="prompt-card focused"><div className="card-heading"><span>01</span><div><h2>{projectName || "Custom prompt"}</h2><p>Edit the example and test your own requirements.</p></div></div><textarea value={prompt} onChange={e=>setPrompt(e.target.value)} rows={10}/><div className="fixed-facts"><span><b>AI parsed</b> Requirements</span><span><b>Validated</b> Geometry</span><span><b>{floorCount} floor</b> Current setup</span></div>{apiError&&<div className="api-error"><AlertTriangle/>{apiError}</div>}<button className="primary-btn wide" onClick={understand} disabled={loading||prompt.trim().length<20}>{loading?"Understanding your prompt...":<>Understand this request <ChevronRight size={17}/></>}</button></div></section>}
 
     {stage==="review" && brief && <section className="review-screen"><div className="section-intro"><span className="eyebrow">AI extraction complete</span><h1>Confirm the requirements.</h1><p>The layout engine will use only these structured inputs.</p></div><div className="requirement-sheet"><div className="sheet-head"><div><small>PROJECT</small><h2>{brief.title}</h2></div><span>{brief.floors} {brief.floors===1?"floor":"floors"}</span></div><div className="requirement-grid"><article><small>PLOT</small><b>{brief.plotWidth} x {brief.plotDepth} {unitMark}</b><p>Facing {brief.facing}; road on the {brief.roadSide} side.</p></article><article><small>PRIVATE SPACES</small><b>{brief.bedrooms} bedrooms / {brief.bathrooms} bathrooms</b><p>Counts extracted directly from your prompt.</p></article><article><small>SHARED SPACES</small><b>{brief.livingRooms} living / {brief.kitchens} kitchen / {brief.diningRooms} dining</b><p>{brief.adjacency.length?brief.adjacency.join("; "):"No special adjacency rule supplied."}</p></article><article><small>FEATURES</small><b>{brief.features.length?brief.features.map(x=>x.replaceAll("_"," ")).join(" / "):"None specified"}</b><p>{brief.style} design direction.</p></article></div>{brief.warnings.length>0&&<div className="warning-list"><h3><AlertTriangle/> Review note</h3>{brief.warnings.map(w=><span key={w}>{w}</span>)}</div>}{feasibility&&feasibility.issues.length>0&&<div className="warning-list"><h3><AlertTriangle/> Feasibility check</h3>{feasibility.issues.map(issue=><span key={issue.message}>{issue.message}</span>)}</div>}<div className="constraint-list"><h3>Automatic geometry checks</h3>{["No overlapping rooms","Every room remains inside the plot","Doors remain attached to rooms","Dimensions use the selected unit",feasibility?.canGenerate?"Program fits the plot":"Program must fit before generation"].map(x=><span key={x}><Check/>{x}</span>)}</div></div><div className="stage-actions"><button className="secondary-btn" onClick={()=>setStage("prompt")}>Correct prompt</button><button className="primary-btn" onClick={generate} disabled={!!feasibility&&!feasibility.canGenerate}>{feasibility&&!feasibility.canGenerate?"Adjust prompt to fit plot":<>Generate structured 2D plan <ChevronRight size={17}/></>}</button></div></section>}
 
-    {stage==="plan" && project && <section className="plan-result"><aside className="plan-summary"><span className="eyebrow">Generated plan</span><h2>{project.brief.title}</h2><p>{project.brief.facing}-facing {project.brief.plotWidth} x {project.brief.plotDepth} {project.brief.unit}</p><div className="orientation-card"><b>N</b><span>ROAD - {project.brief.roadSide.toUpperCase()} SIDE</span><strong>&rarr;</strong></div><div className="validation-card"><div className={errors.length?"status error":"status valid"}>{errors.length?<AlertTriangle/>:<Check/>}<span><b>{errors.length?"Needs correction":"Architecture checked"}</b><small>{errors.length?`${errors.length} blocking issue(s)`:architecture?`Quality score ${architecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{errors.map(e=><p key={e}>{e}</p>)}{!errors.length&&architecture?.warnings.map(w=><p className="arch-warning" key={w}>{w}</p>)}</div>{(designSaving||designSaveError)&&<div className={designSaveError?"revision-feedback error":"revision-feedback"}><b>{designSaveError?"Project save failed":"Saving project design..."}</b>{designSaveError&&<span>{designSaveError}</span>}</div>}{project.generationTrace&&<div className="engine-trace-card"><h3><Ruler size={13}/> Engine trace</h3><p>Selected: <b>{project.generationTrace.selectedLabel}</b></p>{project.generationTrace.candidates.map(candidate=><article key={candidate.label} className={candidate.selected?"selected":candidate.valid?"valid":"error"}><div><b>{candidate.label}</b><small>{candidate.source} / score {candidate.score}</small></div><em>{candidate.selected?"WIN":candidate.valid?"OK":"FAIL"}</em>{candidate.errors.map(error=><span key={error}>{error}</span>)}{!candidate.errors.length&&candidate.warnings.slice(0,2).map(warning=><span key={warning}>{warning}</span>)}</article>)}</div>}{versionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{versionHistory.map(entry=><button key={entry.id} className={activeVersionId===entry.id?"active":""} onClick={()=>loadVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise this plan</h3><textarea value={revisionText} onChange={e=>setRevisionText(e.target.value)} rows={4} placeholder="Example: move kitchen closer to dining, make hallway wider, add porch near entry."/><button className="primary-btn wide" onClick={applyRevision} disabled={revisionLoading||revisionText.trim().length<5}>{revisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{revisionFeedback.summary&&<div className={revisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{revisionFeedback.summary}</b>{revisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{project.plans[0].rooms.map(r=><button key={r.id} className={selectedId===r.id?"active":""} onClick={()=>setSelectedId(r.id)}><i style={{background:r.color}}/><span>{r.name}</span><small>{r.width.toFixed(1)} x {r.depth.toFixed(1)}</small></button>)}</div><div className="next-phase preview-ready"><b>3D preview unlocked</b><span>Generated from this exact 2D room geometry.</span></div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Structured geometry / measurements in {project.brief.unit}</span><div><button onClick={goBack}><ArrowLeft/> Back</button><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}<button onClick={regenerateVersion}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={project.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} onCapture={setBlueprintImage}/>:viewMode==="render"?<div className="preview-canvas"><PreviewView plan={project.plans[0]} blueprintImage={blueprintImage} previewVersions={activeVersion?.previewVersions ?? []} onPreviewGenerated={handlePreviewGenerated}/></div>:<div className="preview-canvas"><HouseViewer plans={project.plans} materials={project.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} roofTemplate={roofTemplate}/></div>}<div className="board-footer"><span>{viewMode==="2d"?"Concept floor plan - requires architect review before construction.":"Preview model - walls are generated from the approved 2D structure."}</span><button className="approve-btn" disabled={errors.length>0}><Check/> Mark 2D plan as approved</button></div></div></section>}
+    {stage==="plan" && project && <section className="plan-result"><aside className="plan-summary"><span className="eyebrow">Generated plan</span><h2>{project.brief.title}</h2><p>{project.brief.facing}-facing {project.brief.plotWidth} x {project.brief.plotDepth} {project.brief.unit}</p><div className="orientation-card"><b>N</b><span>ROAD - {project.brief.roadSide.toUpperCase()} SIDE</span><strong>&rarr;</strong></div><div className="validation-card"><div className={errors.length?"status error":"status valid"}>{errors.length?<AlertTriangle/>:<Check/>}<span><b>{errors.length?"Needs correction":"Architecture checked"}</b><small>{errors.length?`${errors.length} blocking issue(s)`:architecture?`Quality score ${architecture.score}/100`:"No overlaps or boundary errors"}</small></span></div>{errors.map(e=><p key={e}>{e}</p>)}{!errors.length&&architecture?.warnings.map(w=><p className="arch-warning" key={w}>{w}</p>)}</div>{(designSaving||designSaveError)&&<div className={designSaveError?"revision-feedback error":"revision-feedback"}><b>{designSaveError?"Project save failed":"Saving project design..."}</b>{designSaveError&&<span>{designSaveError}</span>}</div>}{project.generationTrace&&<div className="engine-trace-card"><h3><Ruler size={13}/> Engine trace</h3><p>Selected: <b>{project.generationTrace.selectedLabel}</b></p>{project.generationTrace.candidates.map(candidate=><article key={candidate.label} className={candidate.selected?"selected":candidate.valid?"valid":"error"}><div><b>{candidate.label}</b><small>{candidate.source} / score {candidate.score}</small></div><em>{candidate.selected?"WIN":candidate.valid?"OK":"FAIL"}</em>{candidate.errors.map(error=><span key={error}>{error}</span>)}{!candidate.errors.length&&candidate.warnings.slice(0,2).map(warning=><span key={warning}>{warning}</span>)}</article>)}</div>}{versionHistory.length>0&&<div className="version-card"><h3><History size={13}/> Versions</h3>{versionHistory.map(entry=><button key={entry.id} className={activeVersionId===entry.id?"active":""} onClick={()=>loadVersion(entry)}><span><b>{entry.label}</b><small>{entry.summary}</small></span><em>{entry.createdAt}</em></button>)}</div>}<div className="revision-card"><h3><Sparkles size={13}/> Revise this plan</h3><textarea value={revisionText} onChange={e=>setRevisionText(e.target.value)} rows={4} placeholder="Example: move kitchen closer to dining, make hallway wider, add porch near entry."/><button className="primary-btn wide" onClick={applyRevision} disabled={revisionLoading||revisionText.trim().length<5}>{revisionLoading?"Applying safely...":<>Apply revision <ChevronRight size={15}/></>}</button>{revisionFeedback.summary&&<div className={revisionFeedback.kind==="error"?"revision-feedback error":"revision-feedback"}><b>{revisionFeedback.summary}</b>{revisionFeedback.details.map(item=><span key={item}>{item}</span>)}</div>}</div><div className="room-key"><h3>Room schedule</h3>{project.plans[0].rooms.map(r=><button key={r.id} className={selectedId===r.id?"active":""} onClick={()=>setSelectedId(r.id)}><i style={{background:r.color}}/><span>{r.name}</span><small>{r.width.toFixed(1)} x {r.depth.toFixed(1)}</small></button>)}</div><div className="next-phase preview-ready"><b>3D preview unlocked</b><span>Generated from this exact 2D room geometry.</span></div></aside><div className="plan-board"><div className="board-toolbar"><span><Ruler/>Structured geometry / measurements in {project.brief.unit}</span><div><button onClick={goBack}><ArrowLeft/> Back</button><button className={viewMode==="2d"?"active":""} onClick={()=>setViewMode("2d")}><Map/> 2D Plan</button><button className={viewMode==="3d"?"active":""} onClick={()=>setViewMode("3d")}><Box/> 3D Preview</button><button className={viewMode==="render"?"active":""} onClick={()=>setViewMode("render")}><Sparkles/> 2D Render</button>{viewMode==="3d"&&<><button className={cameraMode==="orbit"?"active":""} onClick={()=>setCameraMode("orbit")}><RotateCcw/> Orbit</button><button className={cameraMode==="walk"?"active":""} onClick={()=>setCameraMode("walk")}><Footprints/> Walk</button></>}{roofControls}<button onClick={regenerateVersion}><RotateCcw/> Regenerate</button>{viewMode==="2d"&&<button className="primary-btn" onClick={exportPlan}><Download/> Download PNG</button>}</div></div>{viewMode==="2d"?<PlanEditor plan={project.plans[0]} selectedId={selectedId} onSelect={setSelectedId} onUpdate={()=>{}} onCapture={setBlueprintImage}/>:viewMode==="render"?<div className="preview-canvas"><PreviewView plan={project.plans[0]} blueprintImage={blueprintImage} previewVersions={activeVersion?.previewVersions ?? []} onPreviewGenerated={handlePreviewGenerated}/></div>:<div className="preview-canvas"><HouseViewer plans={project.plans} materials={project.materials} selectedId={selectedId} onSelect={setSelectedId} activeFloor={0} showCeiling={cameraMode==="walk"} cutaway={false} mode={cameraMode} interiors={true} roofTemplate={roofTemplate} onReplaceOpening={replaceSingleOpening} onAddWindow={addSingleWindow}/></div>}<div className="board-footer"><span>{viewMode==="2d"?"Concept floor plan - requires architect review before construction.":"Preview model - walls are generated from the approved 2D structure."}</span><button className="approve-btn" disabled={errors.length>0}><Check/> Mark 2D plan as approved</button></div></div></section>}
   </main>;
 }
+
+
 
 
 
